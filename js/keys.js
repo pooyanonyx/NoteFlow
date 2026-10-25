@@ -48,7 +48,7 @@ export const SHORTCUT_GROUPS = [
   ["Hold for a moment", [["Hand tool while the key is held, then back to your tool", "Space"]]],
   ["Edit", [
     ["Undo", `${MOD}+Z`], ["Redo", `${MOD}+Shift+Z  /  ${MOD}+Y`], ["Delete the selected item", "Delete"], ["Deselect / close a menu", "Esc"],
-    ["Finish typing in a text box", `Esc  /  ${MOD}+Enter`], ["Mind map: child node / sibling node", "Tab  /  Enter"], ["Mind map: edit text, delete branch", "F2  /  Shift+Delete"]]],
+    ["Finish typing in a text box", `Esc  /  ${MOD}+Enter`], ["Text box: bold / italic / underline", `${MOD}+B  /  ${MOD}+I  /  ${MOD}+U`], ["Text box: numbered / bulleted list", `${MOD}+Shift+7  /  ${MOD}+Shift+8`], ["Mind map: child node / sibling node", "Tab  /  Enter"], ["Mind map: edit text, delete branch", "F2  /  Shift+Delete"]]],
   ["View", [
     ["Zoom in / out / fit", "+  /  -  /  0"], ["Scroll", "Arrow keys"], ["Scroll a screen up / down", "Page Up / Page Down"],
     ["First / last page (board: fit all)", "Home / End"], ["Previous / next page", "Alt+Left / Alt+Right"], ["Show / hide the toolbars", `${MOD}+.`]]],

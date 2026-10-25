@@ -9,15 +9,19 @@
 //   image        {t:"image", x1,y1,x2,y2, data: base64 PNG}
 //   note         {t:"note", x,y,w,h, text, color (paper), size}
 //   text         {t:"text", x,y, text, color, size}   optional: w (box width), dir/align, ruled (true = line pitch and baselines follow the
-//                                                    ruling of lined paper; false = free text placed on lined paper; absent = free / old item)
+//                                                    ruling of lined paper; false = free text placed on lined paper; absent = free / old item),
+//                                                    rp (line pitch of the paper it is ruled on, when not 24), runs / lists (rich text, see richtext.js),
+//                                                    fl / cont / ns (the box is one piece of text that continues on the next page, see flow.js)
 // Any item may also carry alpha (0..255) and bright (-100..100).
 // Items are never modified in place: an edit creates a new object (cheap undo snapshots).
 
+import * as RT from "./richtext.js";
+import { PAPERS, RULE_TOP, RULE_PITCH, RULE_BOTTOM, sanitizePaperProps } from "./paper.js";
 export const PAGE_W = 595.0, PAGE_H = 842.0;             // notebook page = A4 in points
-export const PAPERS = ["blank", "lined", "grid"];
-// Lined paper: rule k is at y = RULE_TOP + k * RULE_PITCH (printed while y < page height - RULE_BOTTOM). Text written "on the lines"
+// Papers (blank, lined, grid, dotted, weekly planner, Cornell notes), their settings and geometry live in paper.js.
+// Lined paper: rule k is at y = RULE_TOP + k * pitch (24 pt unless the page says otherwise). Text written "on the lines"
 // (text item with ruled: true) is laid out on this same lattice, see render.js.
-export const RULE_TOP = 72.0, RULE_PITCH = 24.0, RULE_BOTTOM = 30.0;
+export { PAPERS, RULE_TOP, RULE_PITCH, RULE_BOTTOM };
 export const NOTE_W = 190.0, NOTE_H = 140.0, NOTE_HEADER = 16.0;
 // File-format identifiers keep their original "DualNote-..." names on purpose: existing files, annotated PDFs and the Windows app check them.
 export const NOTEBOOK_FORMAT = "DualNote-notebook";
@@ -230,7 +234,17 @@ function addFmt(d, out) {          // (hoisted: also used by node items)
   }
   if (out.t === "text" && d.w !== undefined) { try { out.w = Math.max(20, Math.min(4000, round2(num(d.w)))); } catch { /* ignore bad optional value */ } }
   if (out.t === "text" && typeof d.ruled === "boolean") out.ruled = d.ruled;
+  if (out.t === "text") addRich(d, out);
   return out;
+}
+function addRich(d, out) {          // rich text + page flow fields of a text item (all optional; invalid values are dropped, the plain text is always kept)
+  const runs = RT.cleanRuns(d.runs, out.text), lists = RT.cleanLists(d.lists, out.text);
+  if (runs) out.runs = runs;
+  if (lists) out.lists = lists;
+  if (typeof d.rp === "number" && Number.isFinite(d.rp)) out.rp = Math.max(8, Math.min(60, Math.round(d.rp)));
+  if (typeof d.fl === "string" && d.fl) out.fl = d.fl.slice(0, 40);
+  if (out.fl && d.cont === true) out.cont = true;
+  if (out.fl && typeof d.ns === "number" && Number.isFinite(d.ns) && d.ns > 0) out.ns = Math.min(100000, Math.round(d.ns));
 }
 export function sanitizeItem(d) {
   try {
@@ -482,6 +496,8 @@ export function resizeItem(d, handle, px, py, textBox = null, e = 0, keepAspect 
   } else if (t === "text") {
     const s = scale ?? 1.0;
     n.size = Math.round(Math.min(400, Math.max(4, d.size * s)) * 10) / 10;
+    if (d.runs && s !== 1) n.runs = RT.scaleSizes(RT.contentOf(d), n.size / d.size).runs || undefined;     // sizes inside the text scale with it
+    if (n.runs === undefined) delete n.runs;
     n.x = round2(x0); n.y = round2(y0);
     if (d.w) n.w = round2(Math.max(20, scale != null ? d.w * s : x1 - x0));
   }
@@ -504,9 +520,17 @@ export class History {
 }
 
 // ------------------------------------------------------------- file formats
+/** A page as it is written to a file: paper + items + only the page settings that were set (older files and apps never see anything new). */
+export function pageToJson(p) {
+  const o = { paper: p.paper, items: [...p.items] };
+  for (const [k, v] of Object.entries(sanitizePaperProps(p))) o[k] = v;
+  return o;
+}
+/** Everything of a page except its items (paper + settings): the session backup stores the items of a page separately. */
+export function pageMeta(p) { const { items, ...meta } = pageToJson({ ...p, items: [] }); return meta; }
+export function clonePage(p) { return { ...p, items: p.items.slice() }; }
 export function notebookToJson(pages) {
-  return JSON.stringify({ format: NOTEBOOK_FORMAT, version: 1, page_size: [PAGE_W, PAGE_H],
-    pages: pages.map((p) => ({ paper: p.paper, items: [...p.items] })) });
+  return JSON.stringify({ format: NOTEBOOK_FORMAT, version: 1, page_size: [PAGE_W, PAGE_H], pages: pages.map(pageToJson) });
 }
 export function parseNotebook(text) {
   let data;
@@ -517,7 +541,7 @@ export function parseNotebook(text) {
     if (!p || typeof p !== "object") throw new Error("Corrupt page data.");
     const paper = PAPERS.includes(p.paper) ? p.paper : "blank";
     const items = pruneOrphans((Array.isArray(p.items) ? p.items : []).map(sanitizeItem).filter(Boolean));
-    return { paper, items };
+    return { paper, items, ...sanitizePaperProps(p) };
   });
 }
 export function pdfAnnotationsToJson(pages) {

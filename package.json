@@ -1,0 +1,14 @@
+{
+  "name": "noteflow",
+  "version": "1.1.0",
+  "private": true,
+  "description": "NoteFlow: PDF annotation, notebooks, whiteboard and mind maps (no build step).",
+  "type": "module",
+  "scripts": {
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node --test \"tests/unit/*.test.mjs\"",
+    "test:e2e": "python3 tests/run_e2e.py",
+    "precache": "node tools/gen-precache.mjs",
+    "serve": "python3 -m http.server 8765 --bind 127.0.0.1"
+  }
+}

@@ -165,7 +165,7 @@ export async function exportNotebookPdf(pages, onProgress = () => {}) {
   for (const p of pages) {
     await preloadImages(p.items);
     const canvas = document.createElement("canvas");
-    renderPage(canvas, M.PAGE_W, M.PAGE_H, p.items, { paper: p.paper, scale: pickScale(M.PAGE_W, M.PAGE_H) });
+    renderPage(canvas, M.PAGE_W, M.PAGE_H, p.items, { paper: p, scale: pickScale(M.PAGE_W, M.PAGE_H) });      // (the whole page: paper type + its spacing / margin / direction settings)
     const img = await out.embedPng(await pngBytes(canvas));
     canvas.width = canvas.height = 1;
     const pg = out.addPage([M.PAGE_W, M.PAGE_H]);

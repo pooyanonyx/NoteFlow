@@ -19,10 +19,11 @@ There is nothing to install and no account to create. Open NoteFlow in your brow
 
 - **One workspace instead of five apps.** PDF, notebook and board live together. Arrange them the way you like.
 - **Mark up PDFs the way you would on paper.** Highlight text, scribble in the margins, add sticky notes and drop in shapes, then save the annotated PDF.
-- **Notes that grow with you.** A notebook that expands page by page, with blank, lined or grid paper.
+- **Notes that grow with you.** A notebook that expands page by page: blank, lined, grid, dotted, weekly planner and Cornell-notes paper, with adjustable line spacing and margins. Long text flows onto the next page by itself, like in a word processor.
+- **Formatted text.** Bold, italic, underline, different sizes inside one text box, bulleted and numbered lists.
 - **A board for big ideas.** A white board or a blackboard for sketches, diagrams and brainstorming.
 - **Mind maps in seconds.** Build a map from the keyboard, or draw links with your finger or pen.
-- **Write in Persian and English.** Mix both in the same note, with full control over direction and alignment.
+- **Write in Persian and English.** Mix both in the same note, with full control over direction and alignment. Right-to-left notebooks put the red margin (or the Cornell cue column) on the right and use Persian day names and a Saturday week start in the planner.
 - **Made for touch and stylus.** Pinch to zoom, scroll with two fingers, and rest your palm on the screen while you write with a pen.
 - **Works offline and keeps your work private.** Your files stay on your device.
 
@@ -196,3 +197,37 @@ Press `?` any time to see the full list.
 ---
 
 **NoteFlow: your PDFs, your notes and your ideas in one place.**
+
+---
+
+## For developers
+
+NoteFlow has no build step: it is plain ES modules served as static files (`python3 -m http.server`, then open `index.html`).
+
+| Part | Where |
+| --- | --- |
+| Data model, file formats, validation | `js/model.js` |
+| Paper types, page settings, geometry, drawing | `js/paper.js` |
+| Rich text content model (runs, lists) | `js/richtext.js` |
+| Bidi ordering of mixed-direction text | `js/bidi.js` |
+| Text layout and drawing (one code path for editing and for the saved result) | `js/render.js` |
+| Text editor element (invisible input layer over the canvas) | `js/editor.js` |
+| Text continuing across pages (pure) | `js/flow.js` |
+| Per-tool default settings (used by the toolbar and by *Reset to default*) | `js/tools.js` |
+| Toolbar, editing, pages, page-bitmap cache | `js/panel.js` |
+| Workspace, autosave, shortcuts | `js/app.js`, `js/workspace.js`, `js/keys.js` |
+
+### Tests
+
+```
+npm test                  # unit tests + browser tests
+npm run test:unit         # node:test, no dependencies (Node 20+)
+npm run test:e2e          # Playwright + Chromium (see tests/README.md)
+```
+
+Tests run automatically on every push and pull request (`.github/workflows/ci.yml`).
+After adding, removing or renaming a file run `npm run precache` (the offline file list in `precache.json`; a unit test fails when it is out of date) and bump `CACHE` in `sw.js` when a release changes files.
+
+### File compatibility
+
+Notebook pages gained optional fields (`spacing`, `margin`, `margin_x`, `dir`, `cue`, `summary`, `week_start`) and text items gained optional `runs`, `lists`, `rp`, `fl`, `cont`, `ns`. They are only written when used; older files open unchanged, and older versions of the app ignore fields they do not know (new paper types show as blank paper there).

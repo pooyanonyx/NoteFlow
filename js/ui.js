@@ -72,6 +72,13 @@ const ICONS = {
   aligncenter: P("M4 6h16M7 10h10M4 14h16M7 18h10"),
   alignright: P("M4 6h16M10 10h10M4 14h16M10 18h10"),
   ruled: P("M4 7h16M4 12h16M4 17h16") + P("M7 14V8l-2 2M7 8l2 2"),
+  reset: P("M4 12a8 8 0 102.6-5.9") + P("M4 4v5h5"),
+  bold: P("M7 5h6a3.2 3.2 0 010 6.4H7z") + P("M7 11.4h7a3.3 3.3 0 010 6.6H7z"),
+  italic: P("M10 5h8M6 19h8M14 5l-4 14"),
+  underline: P("M7 4v7a5 5 0 0010 0V4M5 20h14"),
+  bullets: '<circle cx="5" cy="7" r="1.2"/><circle cx="5" cy="12" r="1.2"/><circle cx="5" cy="17" r="1.2"/>' + P("M10 7h10M10 12h10M10 17h10"),
+  numbered: P("M10 7h10M10 12h10M10 17h10M4 5.5l1.5-1v4M3.8 13.5c0-1.6 2.4-1.3 2.4.1 0 1-1.8 1.8-2.5 2.6h2.7") ,
+  paper: P("M6 3h12v18H6z") + P("M9 8h6M9 12h6M9 16h6"),
   brush: P("M18 3l3 3-9 9-3-3z") + P("M9 12c-3 0-4 2-4 4s-1 3-2 4c4 1 8-1 8-5"),
 };
 export function icon(name, cls = "") {
@@ -202,7 +209,7 @@ const toStyle = (k, v) => (k === "alpha" ? Math.round(v * 255 / 100) : v);
 
 /** Sliders for thickness/opacity/brightness/text size with live preview.
  *  onInput(key, value) fires while dragging; onCommit(key, value) when released/changed. */
-export function brushContent({ getStyle, onInput, onCommit, widthEnabled = true, eraser = false }) {
+export function brushContent({ getStyle, onInput, onCommit, widthEnabled = true, eraser = false, onReset = null, isDefault = null, resetTitle = "" }) {
   const rows = {}, prev = el("canvas", { class: "bprev", width: 440, height: 116 });
   const drawPreview = () => {
     const st = getStyle(), ctx = prev.getContext("2d"), w = prev.width, h = prev.height;
@@ -221,23 +228,67 @@ export function brushContent({ getStyle, onInput, onCommit, widthEnabled = true,
     ctx.fillText("Aa", w * 0.86, h / 2);
   };
   const box = el("div", { class: "brush" });
+  let resetBtn = null;
+  const refreshReset = () => { if (resetBtn && isDefault) resetBtn.disabled = !!isDefault(); };
   for (const [key, label0, lo0, hi0, fmt] of BRUSH) {
     if (eraser && key !== "width") continue;                       // the eraser only has a size
     const label = eraser ? "Eraser size" : label0, lo = eraser ? 4 : lo0, hi = eraser ? 120 : hi0;
     const val = el("span", { class: "bval" });
     const sl = el("input", { type: "range", min: lo, max: hi, step: 1, "aria-label": label });
-    sl.addEventListener("input", () => { val.textContent = fmt(+sl.value); onInput?.(key, toStyle(key, +sl.value)); drawPreview(); });
-    sl.addEventListener("change", () => onCommit?.(key, toStyle(key, +sl.value)));
+    sl.addEventListener("input", () => { val.textContent = fmt(+sl.value); onInput?.(key, toStyle(key, +sl.value)); drawPreview(); refreshReset(); });
+    sl.addEventListener("change", () => { onCommit?.(key, toStyle(key, +sl.value)); refreshReset(); });
     rows[key] = { sl, val, fmt };
     box.append(el("label", { class: "brow" }, el("span", { class: "blab" }, label), sl, val));
   }
   box.append(prev);
+  if (onReset) {                                                   // "Reset to default": this tool's settings only (what is reset is spelled out in the tooltip)
+    resetBtn = el("button", { class: "btn small reset", type: "button", title: resetTitle, "aria-label": "Reset to default", onclick: () => { onReset(); } }, icon("reset"), "Reset to default");
+    box.append(el("div", { class: "resetrow" }, resetBtn));
+  }
   const update = (st = getStyle(), widthOn = widthEnabled) => {
     for (const [key] of BRUSH) { const r = rows[key]; if (!r) continue; r.sl.value = toSlider(key, st[key]); r.val.textContent = r.fmt(+r.sl.value); }
     rows.width.sl.disabled = !widthOn;
-    drawPreview();
+    drawPreview(); refreshReset();
   };
   update();
   box.update = update;
+  return box;
+}
+
+/** The "Paper" settings popup: direction, margin, line spacing and the options of the chosen paper. Every change is applied at once (one undo step each). */
+export function paperContent({ getSpec, names = {}, count = 1, onChange, onReset }) {
+  const box = el("div", { class: "papermenu", role: "group", "aria-label": "Paper settings" });
+  let all = false;
+  const apply = (patch) => { onChange(patch, all); draw(); };
+  const seg = (label, opts, cur, key) => el("div", { class: "prow" }, el("span", { class: "blab" }, label),
+    el("div", { class: "segmini", role: "group", "aria-label": label }, opts.map(([v, t, tip]) => el("button", { class: "btn small" + (cur === v ? " on" : ""), type: "button", title: tip || t, "aria-pressed": String(cur === v), onclick: () => apply({ [key]: v }) }, t))));
+  const slider = (label, key, lo, hi, val) => {
+    const out = el("span", { class: "bval" }, `${val} pt`);
+    const sl = el("input", { type: "range", min: lo, max: hi, step: 1, value: val, "aria-label": label,
+      oninput: () => { out.textContent = `${sl.value} pt`; }, onchange: () => apply({ [key]: +sl.value }) });
+    return el("label", { class: "brow" }, el("span", { class: "blab" }, label), sl, out);
+  };
+  const draw = () => {
+    const sp = getSpec(), kind = sp.paper, rows = [];
+    rows.push(el("div", { class: "ptitle" }, names[kind] || kind));
+    rows.push(seg("Writing direction", [["ltr", "Left to right", "Left-to-right pages (English ...)"], ["rtl", "Right to left", "Right-to-left pages (Persian, Arabic, Hebrew ...): the margin and new text move to the right"]], sp.dir, "dir"));
+    if (kind === "lined" || kind === "cornell") {
+      rows.push(seg(kind === "cornell" ? "Cue column" : "Red margin", [["left", "Left"], ["right", "Right"], ...(kind === "lined" ? [["none", "None"]] : [])], sp.margin === "none" && kind === "cornell" ? (sp.dir === "rtl" ? "right" : "left") : sp.margin, "margin"));
+      if (kind === "lined" && sp.margin !== "none") rows.push(slider("Margin position", "margin_x", 30, 160, sp.margin_x));
+      if (kind === "cornell") { rows.push(slider("Cue column width", "cue", 80, 240, sp.cue)); rows.push(slider("Summary height", "summary", 60, 260, sp.summary)); }
+    }
+    if (kind === "weekly") rows.push(seg("Week starts on", [["mon", "Mon"], ["sun", "Sun"], ["sat", "Sat"]], sp.week_start, "week_start"));
+    const range = { lined: [16, 48, "Line spacing"], cornell: [16, 48, "Line spacing"], grid: [10, 40, "Grid size"], dotted: [10, 40, "Dot spacing"], weekly: [16, 40, "Line spacing"] }[kind];
+    if (range) rows.push(slider(range[2], "spacing", range[0], range[1], sp.spacing));
+    if (kind === "blank") rows.push(el("div", { class: "hint" }, "Blank paper has no lines. Pick another paper above for more options."));
+    if (count > 1) {
+      const cb = el("input", { type: "checkbox", checked: all, onchange: () => { all = cb.checked; } });
+      rows.push(el("label", { class: "allrow", title: "Apply every change on this popup to all pages of the notebook" }, cb, el("span", {}, `Apply to all ${count} pages`)));
+    }
+    rows.push(el("div", { class: "resetrow" }, el("button", { class: "btn small reset", type: "button", title: "Restore the spacing, margin and direction of this page to their defaults (the paper type stays).", "aria-label": "Reset to default",
+      onclick: () => { onReset(all); draw(); } }, icon("reset"), "Reset to default")));
+    box.replaceChildren(...rows);
+  };
+  draw();
   return box;
 }

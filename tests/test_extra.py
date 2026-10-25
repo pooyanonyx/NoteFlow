@@ -9,7 +9,7 @@ with sync_playwright() as pw:
     a = App(pw, width=1100, height=800, dpr=2)
     a.ev("() => { const p = noteflow.panels.nb; p.applyStyle('size', 18, false); p.setTool('text'); }")
     a.click_page(100, 100); a.type_lines(["HHH"] * 4)
-    info = a.ev("""() => { const p = noteflow.panels.nb, ar = p.ta.getBoundingClientRect(), r = p.stage.getBoundingClientRect(), [ox, oy] = p.origin(), d = p.editedItem();
+    info = a.ev("""() => { const p = noteflow.panels.nb, ar = p.rt.el.getBoundingClientRect(), r = p.stage.getBoundingClientRect(), [ox, oy] = p.origin(), d = p.editedItem();
       return { rect: [ar.left, ar.top, ar.width, ar.height], stage: [r.left, r.top], v: p.view, oy, d }; }""")
     s = info["v"]["scale"]; left, top, w, h = info["rect"]
     img = shot(a, clip={"x": left + 1, "y": top + 1, "width": 30 * s, "height": h - 2})          # device pixels (2x)
@@ -38,17 +38,17 @@ with sync_playwright() as pw:
     it = a.ev("() => noteflow.panels.board.pages[0].items.at(-1)")
     C.check("board text: no ruled flag, 1.25 line pitch layout", it["t"] == "text" and "ruled" not in it)
     C.check("snap button hidden on the board", a.ev("() => noteflow.panels.board.snapBtn.hidden"))
-    # editor box on the board is the old one (opaque background, not transparent)
+    # while a board text is edited it is drawn live by the canvas on its light backing (the editor element itself is only the invisible input layer)
     a.page.mouse.dblclick(*r) ; a.page.wait_for_timeout(150)
-    bg = a.ev("() => getComputedStyle(noteflow.panels.board.ta).backgroundColor")
-    C.check("board editor keeps its white background", "255, 255, 255" in bg, bg)
+    st = a.ev("() => { const p = noteflow.panels.board; return [p.editing && p.editing.rich, getComputedStyle(p.rt.el).color, p.rt.el.hidden]; }")
+    C.check("board text editor: live canvas text, invisible input layer", st[0] is True and st[2] is False and st[1] in ("rgba(0, 0, 0, 0)", "transparent"), st)
     a.page.keyboard.press("Escape")
 
     # --- the lined-page editor does not use the opaque background (rules stay visible while typing)
     a.ev("async () => { await noteflow.setLayout(['nb'], false); }"); a.page.wait_for_timeout(400)
     a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; p.setTool('text'); }")
     a.click_page(100, 100); a.type_lines(["abc"])
-    bg = a.ev("() => getComputedStyle(noteflow.panels.nb.ta).backgroundColor")
+    bg = a.ev("() => getComputedStyle(noteflow.panels.nb.rt.el).backgroundColor")
     C.check("lined editor background transparent", bg in ("rgba(0, 0, 0, 0)", "transparent"), bg)
     a.page.screenshot(path="/tmp/editing.png")
     a.finish()

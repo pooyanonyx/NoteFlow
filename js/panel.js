@@ -4,7 +4,12 @@ import * as M from "./model.js";
 import * as R from "./render.js";
 import * as PDF from "./pdfio.js";
 import * as K from "./keys.js";
-import { el, icon, toast, dialog, popup, closePopup, paletteContent, customColorDialog, brushContent } from "./ui.js";
+import * as P from "./paper.js";
+import * as T from "./tools.js";
+import * as RT from "./richtext.js";
+import * as F from "./flow.js";
+import { RichEditor } from "./editor.js";
+import { el, icon, toast, dialog, popup, closePopup, paletteContent, customColorDialog, brushContent, paperContent } from "./ui.js";
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const TOOL_INFO = {
@@ -21,24 +26,16 @@ const PDF_TOOLS = ["select", "pan", "pen", "mark", "hltext", "eraser", "text", "
 const NB_TOOLS = ["select", "pan", "pen", "mark", "eraser", "text", "note", "shape"];
 const BOARD_TOOLS = ["select", "pan", "pen", "mark", "eraser", "text", "note", "shape"];
 const SEP_AFTER = new Set(["pan", "eraser", "shape", "link"]);
-const GROUP_OF_TOOL = { eraser: "erase", pen: "draw", text: "draw", shape: "draw", node: "draw", link: "draw", mark: "mark", hltext: "hltext", note: "note" };
+const GROUP_OF_TOOL = T.TOOL_GROUP;                // every creating tool has its OWN settings (tools.js)
 const MIND_TOOLS = ["node", "link"];                  // on every panel (PDF, notebook, board) these two tools live in one "Mind map" menu button
 const OLD_SHAPE_TOOLS = ["line", "arrow", "rect", "ellipse"];     // separate tools of older versions / workspaces -> Shapes tool
 const STYLE_TO_ITEM = { color: "color", width: "w", size: "size", alpha: "alpha", bright: "bright" };
-export function defaultGroups(color = "#d32f2f") {
-  return {
-    draw: { color, width: 2, size: 18, alpha: 255, bright: 0 },
-    mark: { color: "#fdd835", width: 14, size: 18, alpha: 110, bright: 0 },
-    hltext: { color: "#fdd835", width: 14, size: 18, alpha: 100, bright: 0 },
-    note: { color: "#fff59d", width: 2, size: 16, alpha: 255, bright: 0 },
-    erase: { color: "#808080", width: 20, size: 18, alpha: 255, bright: 0 },       // eraser: width = its diameter (page units)
-  };
-}
 const HANDLE_R = 7;                       // drawn handle radius (screen px)
 const MAX_IMAGE_SIDE = 2400;
 const GAP = 12;                      // space between pages in the continuous PDF view (page units)
 const RASTER_BUDGET = 40e6;          // max total pixels of cached page bitmaps (memory limit)
 const RASTER_MAX = 12;               // max cached page bitmaps
+const LAYER_BUDGET = 56e6, LAYER_MAX = 16;   // rendered notebook pages / annotation layers kept as bitmaps (pixels, count)
 const freeCanvas = (c) => { try { c.width = c.height = 0; } catch { /* ignore */ } };
 
 export class Panel {
@@ -50,18 +47,19 @@ export class Panel {
     this.view = { scale: 1, tx: 0, ty: 0, fit: kind !== "board", init: kind !== "board" };     // a board starts at 100 %, centred (see onResize)
     this.cw = 300; this.ch = 300; this.dpr = window.devicePixelRatio || 1;
     this.tool = "pen";
-    this.groups = defaultGroups(kind === "pdf" ? "#d32f2f" : "#1a1a1a");
-    this.curStyle = { ...this.groups.draw };
+    this.groups = T.toolDefaults(kind);
+    this.curStyle = { ...this.groups.pen };
     this.recent = [];
     this.selected = null; this.live = null; this.preview = null; this.action = null;
     this.editing = null; this.pointers = new Map(); this.gesture = null; this.lastPen = 0; this.lastTap = null;
     this.pdf = null; this.sizes = []; this.words = null; this.wordsPage = -1; this.pageToken = 0;
     // continuous PDF view: page layout + cached page bitmaps (only pages near the screen are rendered)
+    this.layers = new Map(); this.layerTick = 0; this.layerTimer = 0;        // finished drawings of whole pages, so scrolling only copies bitmaps
     this.rasters = new Map(); this.rasterJob = null; this.rasterTimer = 0; this.badPages = new Set();
     this.sizeJobs = new Map(); this.offs = null; this.docW = 595; this.docH = 842; this.vp = 0; this.vpLock = null; this.fling = 0;
     this.fmt = { dir: "ltr", align: "left" }; this.fmtKey = "";      // text direction / alignment used for new text
     this.snapLines = true;                                          // text written on lined paper follows the printed rules (see render.js "writing on ruled paper")
-    this.shapeKind = "rect"; this.fillOn = false; this.fillKey = "";  // Shapes tool: active shape + Fill switch
+    this.shapeKind = "rect"; this.fill = { shape: false, mind: false }; this.fillKey = "";  // Shapes tool: active shape + Fill switch (Shapes and Mind map keep their own)
     this._bc = new WeakMap(); this.eraserPos = null;
     this.connStyle = "curve"; this.connArrow = true; this.nodeKind = "round"; this.mindKey = ""; this.linkTarget = null; this._nm = null;   // mind map defaults
     if (kind === "nb") { this.layout(); this.view.ty = 14; }
@@ -77,6 +75,8 @@ export class Panel {
 
   // ------------------------------------------------------------------ state
   get items() { return this.pages[this.cur]?.items ?? []; }
+  get fillOn() { return !!this.fill[this.tool === "node" || this.tool === "link" ? "mind" : "shape"]; }
+  set fillOn(v) { this.fill[this.tool === "node" || this.tool === "link" ? "mind" : "shape"] = !!v; }
   get drawList() { return this.live ?? this.items; }
   get hasPage() { return this.kind !== "pdf" || !!this.pdf; }
   get minZoom() { return this.kind === "board" ? 0.06 : 0.2; }
@@ -85,9 +85,9 @@ export class Panel {
   shown() { return this.continuous() ? this.vp : this.cur; }         // page number shown in the toolbar
   defSize() { return this.sizes[0] || this.sizes.find(Boolean) || [595, 842]; }
   sizeOf(i) { return this.kind === "nb" ? [M.PAGE_W, M.PAGE_H] : this.kind === "board" ? [M.BOARD_W, M.BOARD_H] : (this.sizes[i] || this.defSize()); }
-  snap() { return this.pages.map((p) => ({ paper: p.paper, items: p.items.slice() })); }
+  snap() { return this.pages.map((p) => (this.kind === "nb" ? M.clonePage(p) : { paper: p.paper, items: p.items.slice() })); }
   restoreSnap(s) {                                    // (a board keeps its current background / grid: those are settings, not undo steps)
-    this.pages = s.map((p) => (this.kind === "nb" ? { paper: p.paper, items: p.items.slice() }
+    this.pages = s.map((p) => (this.kind === "nb" ? M.clonePage(p)
       : this.kind === "board" ? { paper: this.pages[0]?.paper || "white", grid: !!this.pages[0]?.grid, items: p.items.slice() } : { items: p.items.slice() }));
   }
 
@@ -154,9 +154,10 @@ export class Panel {
       this.b.del = b("trash", "", "Delete this page", () => this.deletePage());
       this.b.earlier = b("prev", "Move", "Move this page earlier", () => this.movePage(-1), "mv");
       this.b.later = b("next", "Move", "Move this page later", () => this.movePage(1), "mv");
-      this.paper = el("select", { class: "paper", "aria-label": "Paper", onchange: () => this.setPaper(this.paper.value) },
-        el("option", { value: "blank" }, "Blank"), el("option", { value: "lined" }, "Lined"), el("option", { value: "grid" }, "Grid"));
-      pageBar.append(el("span", { class: "gap" }), this.b.add, this.b.del, this.b.earlier, this.b.later, this.paper);
+      this.paper = el("select", { class: "paper", "aria-label": "Paper", title: "Paper of this page", onchange: () => this.setPaper(this.paper.value) },
+        P.PAPERS.map((k) => el("option", { value: k }, P.PAPER_NAMES[k])));
+      this.paperBtn = el("button", { class: "btn", type: "button", title: "Paper settings: line spacing, margin, direction, layout", "aria-haspopup": "dialog", onclick: () => this.openPaper() }, icon("paper"), el("span", { class: "lbl" }, "Paper"), icon("chevdown", "tiny"));
+      pageBar.append(el("span", { class: "gap" }), this.b.add, this.b.del, this.b.earlier, this.b.later, this.paper, this.paperBtn);
     }
 
     const toolBar = mk("bar tools");
@@ -199,8 +200,16 @@ export class Panel {
     const F = this.fmtBtns;
     this.snapBtn = fb("ruled", "Snap text to the ruled lines: every line sits on a line of the paper, whatever the text size", () => this.setSnap(!this.snapDisplay()));
     this.snapSep = el("span", { class: "fsep" });
-    this.fmtGroup = el("span", { class: "fmtgrp", role: "group", "aria-label": "Text direction and alignment", hidden: true },
-      F.ltr, F.rtl, el("span", { class: "fsep" }), F.left, F.center, F.right, this.snapSep, this.snapBtn);
+    this.rtBtns = {
+      b: fb("bold", `Bold (${K.MOD}+B)`, () => this.richCmd("b")), i: fb("italic", `Italic (${K.MOD}+I)`, () => this.richCmd("i")), u: fb("underline", `Underline (${K.MOD}+U)`, () => this.richCmd("u")),
+      ul: fb("bullets", `Bulleted list (${K.MOD}+Shift+8)`, () => this.richCmd("ul")), ol: fb("numbered", `Numbered list (${K.MOD}+Shift+7)`, () => this.richCmd("ol")),
+      smaller: fb("minus", "Smaller text (the selected words, or the whole box)", () => this.richCmd("smaller")), bigger: fb("plus", "Bigger text (the selected words, or the whole box)", () => this.richCmd("bigger")),
+    };
+    this.sizeLbl = el("span", { class: "sizelbl", title: "Text size" });
+    const RB = this.rtBtns;
+    this.richGroup = el("span", { class: "richgrp" }, el("span", { class: "fsep" }), RB.b, RB.i, RB.u, el("span", { class: "fsep" }), RB.ul, RB.ol, el("span", { class: "fsep" }), RB.smaller, this.sizeLbl, RB.bigger);
+    this.fmtGroup = el("span", { class: "fmtgrp", role: "group", "aria-label": "Text format", hidden: true },
+      F.ltr, F.rtl, el("span", { class: "fsep" }), F.left, F.center, F.right, this.snapSep, this.snapBtn, this.richGroup);
     for (const ev of ["pointerdown", "mousedown"]) this.fmtGroup.addEventListener(ev, (e) => e.preventDefault());   // keep the text cursor in the editor
     this.buildMindGroup();
     toolBar.append(this.fmtGroup, this.mindGroup, el("span", { class: "gap" }), this.colorBtn, this.brushBtn);
@@ -212,8 +221,9 @@ export class Panel {
     this.ta = el("textarea", { class: "editor", hidden: true, rows: 1, dir: "auto", spellcheck: false, autocapitalize: "off",
       oninput: () => this.positionEditor(), onblur: () => this.finishEdit(),
       onkeydown: (e) => this.onEditorKey(e) });
+    this.rt = new RichEditor({ onInput: () => this.onRichInput(), onSelection: () => this.onRichSel(), onKey: (e) => this.onRichKey(e), onBlur: () => this.finishEdit() });
     this.msg = el("div", { class: "msg" });
-    this.stage = el("div", { class: "stage", tabIndex: -1 }, this.canvas, this.ta, this.msg);
+    this.stage = el("div", { class: "stage", tabIndex: -1 }, this.canvas, this.ta, this.rt.el, this.msg);
     this.body = el("div", { class: "pbody" }, this.stage, this.bars);    // bars overlay the stage (position:absolute), they take no layout space
     this.root = el("section", { class: "panel", dataset: { key: this.key, kind: this.kind } }, head, this.body, this.fileInput, this.imgInput);
 
@@ -267,11 +277,13 @@ export class Panel {
       const field = STYLE_TO_ITEM[key];
       if (field in d || key === "alpha" || key === "bright") {
         const v = key === "width" || key === "size" ? Number(value) : value;
-        const n = { ...d, [field]: v };
+        let n = { ...d, [field]: v };
         if (key === "color" && d.fill) n.fill = v;                  // a filled shape stays filled with its colour
+        if (key === "size" && d.t === "text" && d.runs) n = F.withContent(n, RT.applyAll(RT.contentOf(d), { z: null }));   // one size for the whole box again
+        if (key === "size" && d.t === "text" && d.ruled === true) n = R.ruledNormalize(n);
         if (JSON.stringify(n) !== JSON.stringify(d)) {
           const items = this.items.slice(); items[this.selected] = n;
-          this.commit(items, { keepSel: true });
+          this.commit(items, { keepSel: true, flowIdx: d.t === "text" ? this.selected : null });
         }
       }
     }
@@ -288,9 +300,41 @@ export class Panel {
   }
   openBrush() {
     this.finishEdit();
+    const g = GROUP_OF_TOOL[this.tool], tool = this.tool;
     const box = brushContent({ getStyle: () => this.curStyle, widthEnabled: this.tool !== "hltext", eraser: this.tool === "eraser",
-      onInput: (k, v) => this.applyStyle(k, v, false), onCommit: (k, v) => this.applyStyle(k, v, true) });
-    popup(this.brushBtn, box);
+      onInput: (k, v) => this.applyStyle(k, v, false), onCommit: (k, v) => this.applyStyle(k, v, true),
+      ...(g ? { onReset: () => this.resetTool(tool), isDefault: () => this.isToolDefault(tool),
+        resetTitle: `Restore the ${T.GROUP_LABEL[g]} settings (colour, thickness, opacity, brightness, text size${g === "shape" ? ", shape, fill" : g === "mind" ? ", connectors, nodes, fill" : ""}) to their defaults. Other tools are not changed.` } : {}) });
+    this.brushBox = box;
+    popup(this.brushBtn, box, { onClose: () => { if (this.brushBox === box) this.brushBox = null; } });
+  }
+  // ------------------------------------------------------------ reset to default
+  toolDefaultsNow() { return T.toolDefaults(this.kind, this.boardIsDark()); }
+  /** Are all settings of this tool (style + the tool's own options) what a new panel starts with? */
+  isToolDefault(tool = this.tool) {
+    const g = GROUP_OF_TOOL[tool]; if (!g) return true;
+    if (!T.sameStyle(this.groups[g], this.toolDefaultsNow()[g])) return false;
+    if (g === "shape") return this.shapeKind === T.EXTRAS_DEFAULT.shape.shapeKind && this.fill.shape === T.EXTRAS_DEFAULT.shape.fill;
+    if (g === "mind") { const e = T.EXTRAS_DEFAULT.mind; return this.connStyle === e.connStyle && this.connArrow === e.connArrow && this.nodeKind === e.nodeKind && this.fill.mind === e.fill; }
+    return true;
+  }
+  /** Put the settings of ONE tool back to their original values; every other tool and every unrelated preference stays as it is. */
+  resetTool(tool = this.tool) {
+    const g = GROUP_OF_TOOL[tool]; if (!g) return false;
+    this.groups[g] = { ...this.toolDefaultsNow()[g] };
+    if (GROUP_OF_TOOL[this.tool] === g) this.curStyle = { ...this.groups[g] };
+    if (g === "shape") { this.shapeKind = T.EXTRAS_DEFAULT.shape.shapeKind; this.fill.shape = T.EXTRAS_DEFAULT.shape.fill; this.updateShapeBtn(); }
+    if (g === "mind") { const e = T.EXTRAS_DEFAULT.mind; this.connStyle = e.connStyle; this.connArrow = e.connArrow; this.nodeKind = e.nodeKind; this.fill.mind = e.fill; }
+    this.fillKey = ""; this.mindKey = ""; this.fmtKey = ""; this.updateColorDot();
+    if (this.brushBox) this.brushBox.update(this.curStyle, this.tool !== "hltext");
+    this.render();
+    toast(`${T.GROUP_LABEL[g]} reset to default.`);
+    return true;
+  }
+  resetRow(tool) {                                   // the same button in every tool's settings menu
+    const g = GROUP_OF_TOOL[tool];
+    return el("div", { class: "resetrow" }, el("button", { class: "btn small reset", type: "button", title: `Restore the ${T.GROUP_LABEL[g]} settings to their defaults. Other tools are not changed.`,
+      "aria-label": `Reset ${T.GROUP_LABEL[g]} to default`, disabled: this.isToolDefault(tool), onclick: () => { closePopup(); this.resetTool(tool); } }, icon("reset"), "Reset to default"));
   }
 
   // ------------------------------------------------------------ view / zoom
@@ -605,22 +649,27 @@ export class Panel {
       ctx.save();
       ctx.translate((this.docW - w) / 2, this.offs[i]);
       const board = this.kind === "board", page = this.pages[i];
+      if (!board) { const m = ctx.getTransform(); ctx.translate((Math.round(m.e) - m.e) / m.a, (Math.round(m.f) - m.f) / m.d); }      // the page edge on a whole device pixel: crisp lines, and a cached page bitmap is copied 1:1 (identical to drawing it live)
       if (!board) { ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 8 / s; ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h); ctx.shadowColor = "transparent"; }   // (no soft shadow around a huge board: blurring a 4000 px rectangle every frame is far too slow)
-      if (this.kind === "nb") R.drawPaper(ctx, w, h, page.paper);
+      // A page nobody is changing is drawn once into a bitmap (paper + all its items) and then only copied while scrolling / panning.
+      const changing = isCur && (this.live || this.editing), cached = !board && !changing && (this.kind === "nb" || page.items.length > 0);
+      if (this.kind === "nb") { if (cached) ctx.drawImage(this.pageLayer(i, w, h, page).canvas, 0, 0, w, h); else R.drawPaper(ctx, w, h, page); }
       else if (board) R.drawBoardBg(ctx, w, h, page, [-v.tx / s, -v.ty / s, (this.cw - v.tx) / s, (this.ch - v.ty) / s]);
-      else { const r = this.rasters.get(i); if (r) { ctx.imageSmoothingQuality = "high"; ctx.drawImage(r.canvas, 0, 0, w, h); } }
+      else { const r = this.rasters.get(i); if (r) { ctx.imageSmoothingQuality = "high"; ctx.drawImage(r.canvas, 0, 0, w, h); } if (cached) ctx.drawImage(this.pageLayer(i, w, h, page).canvas, 0, 0, w, h); }
       const list = isCur ? this.drawList : page.items;
-      if (list.length || (isCur && this.preview)) {
+      if (cached ? (isCur && this.preview) : (list.length || (isCur && this.preview))) {
         ctx.save();
         ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
         const nodes = this.nodeMapFor(list, isCur ? this.preview : null);
         const o = board ? { theme: R.boardTheme(page.paper), bg: R.BOARD_COLORS[page.paper], nodes } : { nodes };
         const vis = board ? [-v.tx / s, -v.ty / s, (this.cw - v.tx) / s, (this.ch - v.ty) / s] : null;
-        for (let k = 0; k < list.length; k++) {
+        for (let k = 0; !cached && k < list.length; k++) {
           if (vis && list[k].t !== "conn") { const bb = this.boundsOf(list[k]); if (bb[2] < vis[0] || bb[0] > vis[2] || bb[3] < vis[1] || bb[1] > vis[3]) continue; }   // off-screen items are skipped
-          R.drawItem(ctx, list[k], { ...o, skipText: isCur && !!this.editing && this.editing.idx === k });
+          const ed = isCur && this.editing && this.editing.idx === k ? this.editing : null;
+          if (ed && ed.rich) this.drawEditBg(ctx, list[k]);
+          R.drawItem(ctx, list[k], { ...o, skipText: !!ed && !ed.rich });          // (a text box being edited is drawn live like any other, so typing looks like the result)
         }
-        if (isCur && this.preview) for (const p of [].concat(this.preview)) R.drawItem(ctx, p, o);
+        if (isCur && this.preview) for (const p of [].concat(this.preview)) { if (this.editing && this.editing.rich && p.t === "text") this.drawEditBg(ctx, p); R.drawItem(ctx, p, o); }
         if (isCur && this.linkTarget && o.nodes) { const n = o.nodes.get(this.linkTarget); if (n) { ctx.strokeStyle = "#1976d2"; ctx.lineWidth = 3; ctx.setLineDash([6, 4]); ctx.strokeRect(Math.min(n.x1, n.x2) - 5, Math.min(n.y1, n.y2) - 5, Math.abs(n.x2 - n.x1) + 10, Math.abs(n.y2 - n.y1) + 10); } }
         ctx.restore();
       }
@@ -630,6 +679,44 @@ export class Panel {
     ctx.restore();
     const list = this.drawList;
     if (this.selected !== null && list[this.selected] && !this.editing) this.drawHandles(ctx, list[this.selected]);
+  }
+  /** The light backing of a free text box while it is edited (on ruled paper the lines show through). */
+  drawEditBg(ctx, d) {
+    if (d.t !== "text" || d.ruled === true || (this.kind === "board" && R.boardTheme(this.pages[this.cur].paper))) return;     // (not on a blackboard: light text on a white patch would vanish)
+    const b = R.textBox(d); ctx.save(); ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.fillRect(b[0], b[1], b[2] - b[0], b[3] - b[1]); ctx.restore();
+  }
+  /** Bitmap of a finished page (notebook: paper + items; PDF: the annotations). Rebuilt when its items / paper / fonts / pictures change or the zoom moved a lot. */
+  pageLayer(i, w, h, page) {
+    const pdf = this.kind === "pdf", want = this.wantFor(i), tick = ++this.layerTick;
+    const sig = pdf ? "" : [page.paper, page.spacing, page.margin, page.margin_x, page.dir, page.cue, page.summary, page.week_start].join("|"), ep = R.assetEpoch + ":" + R.fontEpoch;
+    let L = this.layers.get(i);
+    const fresh = !!L && L.items === page.items && L.sig === sig && L.ep === ep;
+    if (fresh) {
+      L.used = tick;
+      if (L.scale < want * 0.9 || L.scale > want * 2.5) this.scheduleLayers();      // zoomed: keep showing the old bitmap, sharpen it when the zoom settles
+      return L;
+    }
+    const canvas = L ? L.canvas : document.createElement("canvas");
+    R.renderPage(canvas, w, h, page.items, { paper: pdf ? null : page, scale: want });
+    R.stats.pageBuilds++;
+    L = { canvas, scale: want, items: page.items, sig, ep, used: tick };
+    this.layers.set(i, L);
+    this.evictLayers();
+    return L;
+  }
+  scheduleLayers() {
+    if (this.layerTimer) return;
+    this.layerTimer = setTimeout(() => {
+      this.layerTimer = 0;
+      for (const [i, L] of this.layers) if (L.scale < this.wantFor(i) * 0.9 || L.scale > this.wantFor(i) * 2.5) this.layers.delete(i);
+      this.render();
+    }, 150);
+  }
+  evictLayers() {
+    let px = 0; for (const L of this.layers.values()) px += L.canvas.width * L.canvas.height;
+    if (this.layers.size <= LAYER_MAX && px <= LAYER_BUDGET) return;
+    const [lo, hi] = this.visibleRange(), order = [...this.layers.entries()].filter(([i]) => i < lo || i > hi).sort((a, b) => a[1].used - b[1].used);
+    for (const [i, L] of order) { if (this.layers.size <= LAYER_MAX && px <= LAYER_BUDGET) break; px -= L.canvas.width * L.canvas.height; L.canvas.width = L.canvas.height = 0; this.layers.delete(i); }
   }
   geom(i, list = this.drawList) {
     const d = list[i];
@@ -700,10 +787,11 @@ export class Panel {
   }
 
   // ------------------------------------------------------------- committing
-  commit(newItems, { keepSel = false, select = null } = {}) {
+  commit(newItems, { keepSel = false, select = null, flowIdx = null } = {}) {
     newItems = M.pruneOrphans(newItems);                                  // a deleted node takes its connectors with it
     this.history.push(this.snap(), this.cur);
     this.pages[this.cur].items = newItems;
+    if (flowIdx !== null && newItems[flowIdx] && newItems[flowIdx].t === "text") { newItems = null; this.reflowAt(this.cur, flowIdx); newItems = this.pages[this.cur].items; }   // a long text box continues on the next page
     this.live = null; this.preview = null;
     this.selected = select !== null ? select : (keepSel ? this.selected : null);
     if (this.selected !== null && this.selected >= newItems.length) this.selected = null;
@@ -780,9 +868,10 @@ export class Panel {
   onDown(e) {
     if (!this.hasPage || e.button > 0) return;
     this.stopFling();
-    const wasEditing = !!this.editing && e.target !== this.ta;
+    const inEditor = e.target === this.ta || this.rt.el.contains(e.target);
+    const wasEditing = !!this.editing && !inEditor;
     if (wasEditing) this.finishEdit();
-    if (e.target === this.ta) return;
+    if (inEditor) return;
     e.preventDefault();
     this.stage.setPointerCapture(e.pointerId);
     const l = this.local(e);
@@ -947,12 +1036,12 @@ export class Panel {
     }
     if (a.type === "move") {
       const live = this.live; this.live = null;
-      if (a.moved && live) { const dx = p.x - a.p0.x, dy = p.y - a.p0.y; if (Math.hypot(dx, dy) >= 0.5) { this.commit(live, { keepSel: true }); return; } }
+      if (a.moved && live) { const dx = p.x - a.p0.x, dy = p.y - a.p0.y; if (Math.hypot(dx, dy) >= 0.5) { this.commit(live, { keepSel: true, flowIdx: a.idx }); return; } }
       this.render(); this.tapSelect(a.idx, l); return;
     }
     if (a.type === "resize") {
       const live = this.live; this.live = null;
-      if (live && JSON.stringify(live[this.selected]) !== JSON.stringify(this.items[this.selected])) this.commit(live, { keepSel: true }); else this.render();
+      if (live && JSON.stringify(live[this.selected]) !== JSON.stringify(this.items[this.selected])) this.commit(live, { keepSel: true, flowIdx: this.selected }); else this.render();
       return;
     }
     if (a.type === "tap" && !a.moved) this.tapCreate(a.p);
@@ -988,12 +1077,14 @@ export class Panel {
     const t = this.tool, idx = this.hit(p), [w, h] = this.pageDims(), st = this.curStyle;
     if (idx !== null && this.items[idx].t === t) { this.selected = idx; this.startEdit(idx); return; }
     if (t === "text") {
-      const bw = Math.min(M.TEXT_BOX_W, w - 8), f = this.fmt;     // new text is a box of fixed width, so alignment is visible; RTL boxes grow leftwards from the tap
-      const proto = { t: "text", x: clamp(f.dir === "rtl" ? p.x - bw : p.x, 4, w - bw - 4), y: clamp(p.y - st.size * 0.7, 0, h - 10), w: bw, dir: f.dir, align: f.align,
+      const geo = this.kind === "nb" ? this.pageGeo() : null, onLines = !!geo && geo.ruled && this.snapLines;
+      const lo = onLines ? geo.x0 : 4, hi = onLines ? geo.x1 : w - 4;                // on ruled paper new text stays out of the margin / cue column
+      const bw = Math.min(M.TEXT_BOX_W, hi - lo), f = this.fmt;     // new text is a box of fixed width, so alignment is visible; RTL boxes grow leftwards from the tap
+      const proto = { t: "text", x: clamp(f.dir === "rtl" ? p.x - bw : p.x, lo, Math.max(lo, hi - bw)), y: clamp(p.y - st.size * 0.7, 0, h - 10), w: bw, dir: f.dir, align: f.align,
         text: "", color: st.color, size: st.size, ...this.styleExtra() };
-      if (this.linedPage()) {                                  // lined paper: the first line goes in the tapped row, every line rests on a rule
+      if (this.linedPage()) {                                  // ruled paper: the first line goes in the tapped row, every line rests on a rule
         proto.ruled = this.snapLines;
-        if (proto.ruled) proto.y = R.ruledYFromTap(p.y, st.size, h);
+        if (proto.ruled) { proto.y = R.ruledYFromTap(p.y, st.size, h, geo.pitch, geo.lastRule); if (geo.pitch !== M.RULE_PITCH) proto.rp = geo.pitch; }
       }
       this.startEdit(null, proto);
     } else {
@@ -1022,7 +1113,7 @@ export class Panel {
     if (kind.closed && this.fillOn) item.fill = st.color;                 // Fill on: interior in the drawing colour, outline stays
     return [item];
   }
-  eraserRadius() { return Math.max(1, this.groups.erase.width / 2); }
+  eraserRadius() { return Math.max(1, this.groups.eraser.width / 2); }
   /**
    * Eraser step: pen / marker strokes lose only the part under the eraser (swept from the previous position to p, so fast drags leave no gaps);
    * every other item (shapes, text, nodes, connectors ...) is removed whole when touched, exactly as before.
@@ -1090,7 +1181,7 @@ export class Panel {
     const grid = el("div", { class: "shapegrid", role: "menu" }, M.SHAPE_KINDS.map((k) => el("button", {
       class: "shp" + (k.id === this.shapeKind ? " on" : ""), type: "button", role: "menuitemradio", "aria-checked": String(k.id === this.shapeKind),
       title: k.label, "aria-label": k.label, onclick: () => { closePopup(); this.setShape(k.id); } }, icon(k.id), el("span", { class: "slab" }, k.label))));
-    popup(this.shapeBtn, grid);                      // pressing the Shapes button again closes the menu
+    popup(this.shapeBtn, el("div", { class: "shapemenu" }, grid, this.resetRow("shape")));                      // pressing the Shapes button again closes the menu
   }
   setShape(id) {
     this.shapeKind = M.shapeKindInfo(id).id;
@@ -1144,9 +1235,9 @@ export class Panel {
   boardIsDark() { return this.pages[0]?.paper === "black"; }
   /** New text / pen ink follows the board: black ink on a whiteboard, white ink on a blackboard (only when the default ink was in use). */
   syncInkToBg() {
-    const dark = this.boardIsDark(), from = dark ? "#1a1a1a" : "#f2f2f2", to = dark ? "#f2f2f2" : "#1a1a1a";
-    if (this.groups.draw.color === from) this.groups.draw.color = to;
-    if (this.curStyle.color === from && GROUP_OF_TOOL[this.tool] === "draw") this.curStyle.color = to;
+    const dark = this.boardIsDark(), from = dark ? T.INK_LIGHT : T.INK_DARK, to = dark ? T.INK_DARK : T.INK_LIGHT;
+    for (const g of T.LEGACY_DRAW_GROUPS) if (this.groups[g].color === from) this.groups[g].color = to;
+    if (this.curStyle.color === from && T.LEGACY_DRAW_GROUPS.includes(GROUP_OF_TOOL[this.tool])) this.curStyle.color = to;
     this.updateColorDot();
   }
   setBoardBg(paper) {
@@ -1225,7 +1316,7 @@ export class Panel {
       title: desc, onclick: () => { closePopup(); this.setTool(tool); } }, icon(ic), el("span", { class: "mlab" }, label, el("small", {}, desc)), el("kbd", {}, K.TOOL_KEYS[tool]));
     popup(this.mindBtn, el("div", { class: "menu mindmenu", role: "menu" },
       row("node", "node", "Node", "Tap to add a node. Tab = child, Enter = sibling."),
-      row("link", "link", "Link", "Drag from one node to another to connect them.")));
+      row("link", "link", "Link", "Drag from one node to another to connect them."), el("div", { class: "msep" }), this.resetRow("node")));
   }
   buildMindGroup() {
     const mb = (ic, title, fn) => el("button", { class: "btn tool fmt", type: "button", title, "aria-label": title, "aria-pressed": "false", onclick: fn }, icon(ic));
@@ -1370,14 +1461,56 @@ export class Panel {
   updateFmtUi() {
     const show = !!this.textTarget() || this.tool === "text" || this.tool === "note";
     const f = show ? this.displayFmt() : null, snapShow = show && this.snapApplies(), snapOn = snapShow && this.snapDisplay();
-    const key = f ? f.dir + "|" + f.align + "|" + (snapShow ? (snapOn ? "S1" : "S0") : "-") : "";
+    const rs = show ? this.richState() : null, tx = this.textTarget();
+    const key = f ? f.dir + "|" + f.align + "|" + (snapShow ? (snapOn ? "S1" : "S0") : "-") + "|" + (rs ? [rs.b, rs.i, rs.u, rs.list, rs.z].join(",") : "-") + "|" + (tx && tx.t === "text" ? "T" : "") : "";
     if (key === this.fmtKey) return;
     this.fmtKey = key; this.fmtGroup.hidden = !show;
     if (!f) return;
+    const isText = !!(tx && tx.t === "text") || this.tool === "text";
+    this.richGroup.hidden = !isText;
+    if (rs) {
+      const on = { b: rs.b === true, i: rs.i === true, u: rs.u === true, ul: rs.list === "b", ol: rs.list === "n" };
+      for (const [k, v] of Object.entries(on)) { this.rtBtns[k].classList.toggle("on", v); this.rtBtns[k].setAttribute("aria-pressed", String(v)); }
+      this.sizeLbl.textContent = rs.z === null ? "–" : String(Math.round(rs.z * 10) / 10);
+    }
     this.snapBtn.hidden = this.snapSep.hidden = !snapShow;
     this.snapBtn.classList.toggle("on", snapOn); this.snapBtn.setAttribute("aria-pressed", String(snapOn));
     const on = { ltr: f.dir === "ltr", rtl: f.dir === "rtl", left: f.align === "left", center: f.align === "center", right: f.align === "right" };
     for (const [k, b] of Object.entries(this.fmtBtns)) { b.classList.toggle("on", on[k]); b.setAttribute("aria-pressed", String(on[k])); }
+  }
+  /** Bold / italic / underline / list / size state of what is edited (the caret or selection), or of the selected text box. Cached: it is read when the selection changes. */
+  richState() {
+    const ed = this.editing;
+    if (ed && ed.rich) {
+      if (this.rstateKey !== "e") { this.rstate = this.rt.styleNow(); this.rstateKey = "e"; }
+      return this.rstate;
+    }
+    const d = this.textTarget();
+    if (d && d.t === "text") {
+      if (this.rstateItem !== d) { const c = RT.contentOf(d), st = RT.styleOfRange(c, 0, c.text.length, d.size); st.list = c.lists && c.lists.every((x) => x === c.lists[0]) ? c.lists[0] : ""; this.rstate = st; this.rstateItem = d; }
+      return this.rstate;
+    }
+    return { b: false, i: false, u: false, list: "", z: this.curStyle.size };
+  }
+  /** Rich text commands (toolbar and keys). While editing they apply to the selection (or to what is typed next); on a selected box, to the whole box. */
+  richCmd(kind) {
+    const ed = this.editing, ladder = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 72, 96, 128];
+    const step = (z, dir) => (dir > 0 ? ladder.find((x) => x > z + 0.01) ?? z : [...ladder].reverse().find((x) => x < z - 0.01) ?? z);
+    if (ed && ed.rich) {
+      const rs = this.richState();
+      if (kind === "b" || kind === "i" || kind === "u") this.rt.toggle(kind);
+      else if (kind === "ul") this.rt.setList("b"); else if (kind === "ol") this.rt.setList("n");
+      else if (kind === "smaller" || kind === "bigger") this.rt.setSize(step(rs.z ?? this.editedItem().size, kind === "bigger" ? 1 : -1));
+      this.rt.focus(); return;
+    }
+    const d = this.textTarget();
+    if (!d || d.t !== "text") return;
+    let c = RT.contentOf(d), n = null;
+    if (kind === "b" || kind === "i" || kind === "u") { const all = RT.styleOfRange(c, 0, c.text.length, d.size)[kind] === true; c = RT.applyAll(c, { [kind]: !all }); n = F.withContent(d, c); }
+    else if (kind === "ul" || kind === "ol") { c = RT.toggleList(c, 0, c.text.length, kind === "ul" ? "b" : "n"); n = F.withContent(d, c); }
+    else { const z = step(d.size, kind === "bigger" ? 1 : -1); n = F.withContent({ ...d, size: z }, RT.applyAll(c, { z: null })); if (n.ruled === true) n = R.ruledNormalize(n); }
+    if (n && JSON.stringify(n) !== JSON.stringify(d)) { const items = this.items.slice(); items[this.selected] = n; this.commit(items, { keepSel: true, flowIdx: this.selected }); }
+    this.fmtKey = ""; this.rstateItem = null; this.render();
   }
   setFmt(patch) {
     this.fmt = { ...this.fmt, ...patch };            // an explicit choice also becomes the default for new text
@@ -1385,7 +1518,7 @@ export class Panel {
     if (ed) {
       const d = ed.idx !== null ? this.items[ed.idx] : ed.proto;
       ed.fmt = { ...(ed.fmt || R.effectiveFmt(d)), ...patch };
-      this.positionEditor(); this.ta.focus({ preventScroll: true });
+      this.refreshEditing();
     } else {
       const d = this.textTarget();
       if (d) {
@@ -1400,7 +1533,7 @@ export class Panel {
   // A text item on lined paper is "ruled" (ruled: true): its line pitch and its baselines follow the printed rules, see render.js.
   // New text on a lined page is ruled while "snap to lines" is on (default). Old text (no ruled flag) is moved onto the lines the
   // first time it is edited; text made with snapping off (ruled: false) stays where it was put.
-  linedPage() { return this.kind === "nb" && this.pages[this.cur]?.paper === "lined"; }
+  linedPage() { return this.kind === "nb" && P.RULED_PAPERS.includes(this.pages[this.cur]?.paper); }       // lined and Cornell paper have printed rules
   /** Does the snap button make sense now? (text on a lined notebook page; not for sticky notes, mind-map nodes, PDFs or boards) */
   snapApplies() {
     if (!this.linedPage()) return false;
@@ -1418,7 +1551,7 @@ export class Panel {
     const ed = this.editing;
     if (ed) {
       const d = ed.idx !== null ? this.items[ed.idx] : ed.proto;
-      if (d && d.t === "text") { ed.ruled = on; this.positionEditor(); this.ta.focus({ preventScroll: true }); }
+      if (d && d.t === "text") { ed.ruled = on; this.refreshEditing(); }
     } else {
       const d = this.textTarget();
       if (d && d.t === "text" && (d.ruled === true) !== on) {
@@ -1428,20 +1561,27 @@ export class Panel {
     }
     this.fmtKey = ""; this.updateFmtUi(); this.render();
   }
-  /** Text item with the pending changes of the open editor applied (format, snap to lines). Other items are returned as they are. */
+  /** The item being edited with everything pending applied: format, snap to lines, and (text boxes) the content of the editor. */
   editedItem() {
     const ed = this.editing;
     if (!ed) return null;
     const base = ed.idx !== null ? this.items[ed.idx] : ed.proto;
-    return base && base.t === "text" ? this.withEditState(base, ed) : base;
+    if (!base || base.t !== "text") return base;
+    const d = this.withEditState(base, ed);
+    return ed.content ? F.withContent(d, ed.content) : d;
   }
   withEditState(base, ed) {
     let d = ed.fmt ? { ...base, ...ed.fmt } : base;
     const want = ed.ruled !== undefined ? ed.ruled : (base.ruled === undefined && ed.auto ? true : base.ruled);
-    if (want === true) d = R.ruledNormalize({ ...d, ruled: true });
+    if (want === true) d = R.ruledNormalize(this.withPitch({ ...d, ruled: true }));
     else if (want === false && d.ruled !== false) d = { ...d, ruled: false };
     return d;
   }
+  /** The text box carries the line pitch of the paper it is written on (omitted for the usual 24). */
+  withPitch(d, pitch = this.pagePitch()) { const o = { ...d }; if (pitch === M.RULE_PITCH) delete o.rp; else o.rp = pitch; return o; }
+  pageSpec(i = this.cur) { return P.paperSpec(this.pages[i] || "blank"); }
+  pagePitch(i = this.cur) { return this.pageSpec(i).spacing; }
+  pageGeo(i = this.cur) { return P.geometry(this.pageSpec(i), M.PAGE_W, M.PAGE_H); }
   /** A settled text item while it is moved / resized: ruled text always lands on the lines. */
   settle(d) { return d && d.t === "text" && d.ruled === true ? R.ruledNormalize(d) : d; }
 
@@ -1449,19 +1589,94 @@ export class Panel {
   startEdit(idx, proto = null, extra = null) {
     this.finishEdit();
     const d = idx !== null ? this.items[idx] : proto;
-    this.editing = { idx, proto, fmt: null, extra };
+    this.editing = { idx, proto, fmt: null, extra, rich: d.t === "text", page0: this.cur, base: null };
     if (idx !== null && d.t === "text" && d.ruled === undefined && this.snapLines && this.linedPage()) this.editing.auto = true;   // old text: put it on the lines
+    this.editingItem = d;
+    if (d.t === "text") {                               // text boxes: rich text (invisible editor over the live canvas text)
+      this.ta.hidden = true;
+      const c = RT.contentOf(d); this.editing.content = c;
+      this.rt.show(); this.rt.setContent(c, this.richCfg(this.editedItem()));
+      this.positionEditor(); this.syncLive(); this.render();
+      this.rt.focus(); this.rt.setSel(c.text.length, c.text.length);
+      this.fmtKey = ""; this.rstateKey = "";
+      return;
+    }
     this.ta.value = (d.t === "conn" ? d.label : d.text) || "";
     if (proto && proto.t === "node") this.preview = [proto, ...(extra || [])];       // the new node (and its link) is visible while its text is typed
     this.ta.hidden = false;
-    this.editingItem = d;
     this.positionEditor();
     this.render();
     this.ta.focus({ preventScroll: true });
     this.ta.setSelectionRange(this.ta.value.length, this.ta.value.length);
   }
+  // ---- rich text editing: the page canvas draws the live text, the editor element is only the (invisible) input layer on top of it
+  richCfg(d) { return { base: d.size, s: this.view.scale, ruled: d.ruled === true, pitch: d.rp || M.RULE_PITCH, fmt: (this.editing && this.editing.fmt) || R.fmtOf(d), indent: R.listIndent(d.size) }; }
+  /** Show the edited text through the normal drawing code: the item is replaced by its live version in the list that is drawn. */
+  syncLive() {
+    const ed = this.editing; if (!ed || !ed.rich) return;
+    const d = this.editedItem();
+    if (ed.idx !== null) { this.live = this.items.slice(); this.live[ed.idx] = d; } else this.preview = d;
+  }
+  positionRich() {
+    const d = this.editedItem(), v = this.view, s = v.scale, [ox, oy] = this.origin(), el = this.rt.el;
+    if (!d) return;
+    this.rt.restyle(this.richCfg(d));
+    const mw = R.textInnerWidth(d), L = R.layoutRich(d), l0 = L.lines[0], cs = getComputedStyle(el), bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
+    el.style.width = (mw ? mw : Math.max(140, L.width + d.size)) * s + 1.5 + "px";                 // (1.5 px slack: the editor never wraps before the canvas does)
+    el.style.minHeight = l0.h * s + "px"; el.style.padding = R.TEXT_PAD * s + "px";               // (the element covers the whole box, so a click anywhere on it stays in the editor)
+    const baseY = v.ty + (oy + d.y + R.TEXT_PAD + l0.base) * s;                                  // where the canvas puts the first baseline
+    el.style.left = v.tx + (ox + d.x) * s - bl + "px";
+    el.style.top = baseY - R.domBaseline(l0.maxSize * s, l0.h * s) - R.TEXT_PAD * s - bt + "px";   // so the caret of the first line sits on it, whatever the font
+  }
+  onRichInput() {
+    const ed = this.editing; if (!ed || !ed.rich) return;
+    ed.content = this.rt.getContent();
+    if (!this.rt.composing) this.liveFlow();                                  // (never rebuild the editor in the middle of an IME composition)
+    this.syncLive(); this.positionEditor(); this.onRichSel(); this.render();
+  }
+  onRichSel() { if (this.editing && this.editing.rich) { this.rstateKey = ""; this.fmtKey = ""; this.render(); } }
+  onRichKey(e) {
+    e.stopPropagation();
+    if (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) { e.preventDefault(); this.finishEdit(); return true; }
+    return false;
+  }
+  focusEditor() { if (this.editing && this.editing.rich) this.rt.focus(); else this.ta.focus({ preventScroll: true }); }
+  /** The format (direction, alignment, snap to lines) of the edited item changed: show it. */
+  refreshEditing() {
+    if (!this.editing) return;
+    if (this.editing.rich) { this.syncLive(); this.positionEditor(); }
+    else this.positionEditor();
+    this.focusEditor(); this.render();
+  }
+  // ---- continuing a long text on the next page while typing
+  flowEnv() { return { layout: (d) => R.layoutRich(d), geoOf: (pg) => P.geometry(P.paperSpec(pg), M.PAGE_W, M.PAGE_H), newPage: (prev) => ({ ...M.clonePage(prev), items: [], auto: true }), newId: M.newId }; }
+  /** The text reached the bottom of the page: the lines that do not fit move to the top of the next page and typing goes on there. */
+  liveFlow() {
+    const ed = this.editing;
+    if (!ed || !ed.rich || this.kind !== "nb") return false;
+    const d = this.editedItem(), pi = this.cur, geo = this.pageGeo(pi);
+    if (!geo.flow || !F.splitItem(d, (x) => R.layoutRich(x), geo.flow.bottom)) return false;
+    if (!ed.base) ed.base = this.snap();                                       // one undo step for the whole edit, also across pages
+    const caret = this.rt.getSel()[0], pages = this.pages.slice();
+    let hp = pi, hi = ed.idx, off = 0;
+    if (ed.idx !== null) {
+      const h = F.chainHead(pages, pi, ed.idx); hp = h.pi; hi = h.idx;
+      const pcs = F.chainPieces(pages, hp, hi), k = pcs.findIndex((c) => c.pi === pi && c.idx === ed.idx);
+      off = F.pieceStarts(pcs.map((c, j) => (j === k ? d : c.item)))[Math.max(0, k)];
+    }
+    const r = F.reflowChain(pages, hp, hi, this.flowEnv(), { pi, idx: ed.idx, item: d });
+    this.pages = r.pages; this.layout();
+    const loc = F.locate(r.pieces, off + caret), it = this.pages[loc.piece.pi].items[loc.piece.idx];
+    if (loc.piece.pi !== this.cur) { const hadCur = this.cur; this.setCur(loc.piece.pi); this.vp = loc.piece.pi; void hadCur; }
+    ed.idx = loc.piece.idx; ed.proto = null; ed.content = RT.contentOf(it);
+    this.rt.setContent(ed.content, this.richCfg(this.editedItem()), [loc.local, loc.local]); this.rt.focus(); this.rt.setSel(loc.local, loc.local);
+    if (!this.pageVisible(this.cur)) this.scrollToPage(this.cur);
+    this.ui();
+    return true;
+  }
   positionEditor() {
     if (!this.editing) return;
+    if (this.editing.rich) { this.positionRich(); return; }
     const d = this.editedItem(), v = this.view, ta = this.ta, s = v.scale;
     if (!d) return;
     const [ox, oy] = this.origin();
@@ -1470,50 +1685,21 @@ export class Panel {
     if (d.t === "node" || d.t === "conn") { this.positionMindEditor(d, f); return; }
     ta.classList.remove("node");
     ta.style.fontSize = d.size * s + "px"; ta.style.lineHeight = "1.25"; ta.style.fontFamily = R.FONT_STACK;
-    if (d.t === "note") {
-      ta.style.left = v.tx + (ox + d.x + 8) * s + "px"; ta.style.top = v.ty + (oy + d.y + M.NOTE_HEADER + 4) * s + "px";
-      ta.style.width = R.noteTextWidth(d) * s + "px"; ta.style.height = Math.max(40, (d.h - M.NOTE_HEADER - 8)) * s + "px";
-      ta.style.color = M.noteTextColor({ color: d.color, bright: M.itemBright(d) }); ta.style.background = "transparent"; ta.classList.add("note");
-    } else if (d.ruled === true) {
-      this.positionRuledEditor(d, f);
-    } else {
-      const mw = R.textInnerWidth(d), L = R.layoutText(R.measureCtx(), ta.value || " ", d.size, mw, f);
-      ta.style.left = v.tx + (ox + d.x + R.TEXT_PAD) * s + "px"; ta.style.top = v.ty + (oy + d.y + R.TEXT_PAD) * s + "px";
-      ta.style.width = (mw ? mw : Math.max(140, L.width + d.size)) * s + "px"; ta.style.height = Math.max(L.lh, L.height + 2) * s + "px";
-      if (mw && ta.scrollHeight > ta.clientHeight) ta.style.height = ta.scrollHeight + "px";
-      ta.style.color = M.cssColor(d); ta.style.background = "rgba(255,255,255,0.85)"; ta.classList.remove("note");
-    }
-  }
-  /** Text box over ruled text while it is typed. Its line height is the (scaled) pitch of the paper and its first baseline is put exactly
-   *  on the baseline the canvas draws the finished text on, so lines stay on the rules while typing, pressing Enter, scrolling and zooming,
-   *  and the text does not move when the box closes. The box is also sized so the browser wraps where the canvas will. */
-  positionRuledEditor(d, f) {
-    const ta = this.ta, v = this.view, s = v.scale, [ox, oy] = this.origin(), px = (n) => n + "px";
-    const lh = R.ruledLH(d.size), lhPx = lh * s, mw = R.textInnerWidth(d);
-    ta.style.fontSize = px(d.size * s); ta.style.lineHeight = px(lhPx); ta.style.fontFamily = R.FONT_STACK;
-    ta.style.color = M.cssColor(d); ta.style.background = "transparent";            // the rules stay visible under the text while typing
-    const cs = getComputedStyle(ta), n = (k) => parseFloat(cs[k]) || 0;
-    const padX = n("borderLeftWidth") + n("paddingLeft") + n("borderRightWidth") + n("paddingRight");
-    const padY = n("borderTopWidth") + n("paddingTop") + n("borderBottomWidth") + n("paddingBottom");
-    const L = R.layoutText(R.measureCtx(), ta.value || " ", d.size, mw, f, true);
-    ta.style.width = px((mw ? mw : Math.max(140, L.width + d.size)) * s + padX);
-    ta.style.height = "0px";                                                          // whole number of rules, from the browser's own wrapping
-    const rows = Math.max(1, Math.round((ta.scrollHeight - n("paddingTop") - n("paddingBottom")) / lhPx));
-    ta.style.height = px(rows * lhPx + padY); ta.scrollTop = 0;                        // (the box shows every line: never scrolled by a caret on a new line)
-    const base = v.ty + (oy + d.y + R.TEXT_PAD + lh - R.RULED_LIFT) * s;              // screen y of the first baseline (as drawn on the canvas)
-    ta.style.left = px(v.tx + (ox + d.x + R.TEXT_PAD) * s - n("borderLeftWidth") - n("paddingLeft"));
-    ta.style.top = px(base - R.domBaseline(d.size * s, lhPx) - n("borderTopWidth") - n("paddingTop"));
+    ta.style.left = v.tx + (ox + d.x + 8) * s + "px"; ta.style.top = v.ty + (oy + d.y + M.NOTE_HEADER + 4) * s + "px";
+    ta.style.width = R.noteTextWidth(d) * s + "px"; ta.style.height = Math.max(40, (d.h - M.NOTE_HEADER - 8)) * s + "px";
+    ta.style.color = M.noteTextColor({ color: d.color, bright: M.itemBright(d) }); ta.style.background = "transparent"; ta.classList.add("note");
   }
   finishEdit() {
     const ed = this.editing;
     if (!ed) return;
+    if (ed.rich) { this.finishRich(ed); return; }
     this.editing = null; this.editingItem = null;
     const text = this.ta.value;
     this.ta.hidden = true; this.ta.classList.remove("node", "conn");
     if (ed.idx !== null) this.live = null;
     if (ed.idx === null) {
       if (text.trim()) {
-        const d0 = { ...ed.proto, text, ...(ed.fmt || {}) }, d = d0.t === "text" ? { ...this.withEditState(ed.proto, ed), text } : d0;
+        const d = { ...ed.proto, text, ...(ed.fmt || {}) };
         if (d.t === "note") d.h = Math.round(Math.max(d.h, R.noteNeededHeight(d, text)) * 100) / 100;
         if (d.t === "node") {                                   // size the new node to its text; it stays selected (Tab / Enter continue the map)
           const fit = R.nodeFit(d, text, ed.domH || 0); d.x2 = Math.round((d.x1 + fit.w) * 100) / 100; d.y2 = Math.round((d.y1 + fit.h) * 100) / 100;
@@ -1541,16 +1727,74 @@ export class Panel {
       } else this.render();
       return;
     }
-    if (old.t === "text" && !text.trim()) { items.splice(ed.idx, 1); this.commit(items); return; }
     const fmtChanged = !!ed.fmt && (ed.fmt.dir !== old.dir || ed.fmt.align !== old.align);
-    const ruledChanged = old.t === "text" && ed.ruled !== undefined && (ed.ruled === true) !== (old.ruled === true);   // snap switched while editing
-    if (text !== old.text || fmtChanged || ruledChanged) {
-      const d = old.t === "text" ? { ...this.withEditState(old, ed), text } : { ...old, text, ...(ed.fmt || {}) };
+    if (text !== old.text || fmtChanged) {
+      const d = { ...old, text, ...(ed.fmt || {}) };
       if (old.t === "note") d.h = Math.round(Math.max(old.h, R.noteNeededHeight(d, text)) * 100) / 100;
       items[ed.idx] = d; this.commit(items, { keepSel: true });
     } else this.render();
   }
-
+  /** Leave the rich text editor: the box is stored (cut into pieces across pages when it is long) as ONE undo step. */
+  finishRich(ed) {
+    ed.content = this.rt.getContent();
+    const d = this.editedItem(), pi = this.cur, old = ed.idx !== null ? this.items[ed.idx] : null, empty = !ed.content.text.trim();
+    this.editing = null; this.editingItem = null; this.rt.hide();
+    this.live = null; this.preview = null;
+    const g = GROUP_OF_TOOL[this.tool]; if (g && this.tool !== "select") this.curStyle = { ...this.groups[g] };      // (the caret's size / colour was only shown, not chosen)
+    const sameC = old && JSON.stringify([ed.content.text, ed.content.runs, ed.content.lists]) === JSON.stringify([old.text, old.runs || null, old.lists || null]);
+    const fmtSame = !ed.fmt || (ed.fmt.dir === old.dir && ed.fmt.align === old.align);
+    if (old && !ed.base && sameC && fmtSame && ed.ruled === undefined && !empty) { this.render(); return; }          // opened and closed without a change: the box is left exactly as it was
+    if (this.kind !== "nb" || (empty && !(old && old.fl))) {
+      if (empty) { if (old) { const items = this.items.slice(); items.splice(ed.idx, 1); this.commit(items); } else this.render(); return; }
+      if (old) { const items = this.items.slice(); items[ed.idx] = d; this.commit(items, { keepSel: true }); } else this.commit([...this.items, d]);
+      return;
+    }
+    const base = ed.base || this.snap(), pages = this.pages.slice();
+    const head = old ? F.chainHead(pages, pi, ed.idx) : { pi, idx: null };
+    const r = F.reflowChain(pages, head.pi, head.idx, this.flowEnv(), { pi, idx: ed.idx, item: d });
+    let out = r.pages;
+    const mine = r.pieces.find((p) => p.pi === pi && (ed.idx === null || p.idx === ed.idx)) || r.pieces[0];
+    if (empty && r.pieces.length === 1 && !out[mine.pi].items[mine.idx].text.trim()) { out = out.slice(); out[mine.pi] = { ...out[mine.pi], items: out[mine.pi].items.filter((_, i) => i !== mine.idx) }; this.commitPages(out, { base, page: ed.page0 }); return; }
+    this.commitPages(out, { base, page: ed.page0, show: mine.pi, select: old ? mine.idx : null });
+  }
+  /** Replace the page list (several pages may have changed) as one undo step. */
+  commitPages(pages, { base = null, page = this.cur, show = this.cur, select = null } = {}) {
+    this.history.push(base || this.snap(), page);
+    this.pages = this.trimAutoPages(pages);
+    this.layout(); this.live = null; this.preview = null;
+    if (show !== this.cur) { this.setCur(Math.min(show, this.pages.length - 1)); }
+    this.selected = select !== null && this.items[select] ? select : null;
+    this.dirty = true; this.app.onChange(this);
+    this.clampView(); this.ui(); this.render();
+  }
+  /** Pages that were added only to hold continued text and are empty again (at the end of the notebook) go away. */
+  trimAutoPages(pages) {
+    let n = pages.length;
+    while (n > 1 && pages[n - 1].auto && !pages[n - 1].items.length) n--;
+    return n === pages.length ? pages : pages.slice(0, n);
+  }
+  /** After a text box was moved, resized or restyled: cut it into pieces (or join it) again, inside the same undo step. */
+  reflowAt(pi, idx) {
+    if (this.kind !== "nb") return;
+    const d = this.pages[pi] && this.pages[pi].items[idx];
+    if (!d || d.t !== "text") return;
+    const geo = this.pageGeo(pi);
+    if (!d.fl && !(geo.flow && F.splitItem(d, (x) => R.layoutRich(x), geo.flow.bottom))) return;
+    const h = F.chainHead(this.pages, pi, idx), r = F.reflowChain(this.pages, h.pi, h.idx, this.flowEnv());
+    this.pages = this.trimAutoPages(r.pages); this.layout();
+  }
+  /** Reflow every long text box of these pages (after the paper, spacing or margins changed). */
+  reflowPages(indexes) {
+    if (this.kind !== "nb") return;
+    for (const pi of indexes) {
+      for (let k = 0; this.pages[pi] && k < this.pages[pi].items.length; k++) {
+        const d = this.pages[pi].items[k];
+        if (d.t !== "text") continue;
+        if (d.fl && F.chainHead(this.pages, pi, k).pi !== pi) continue;
+        this.reflowAt(pi, k);
+      }
+    }
+  }
   onEditorKey(e) {
     const ed = this.editing, d = ed && (ed.idx !== null ? this.items[ed.idx] : ed.proto);
     if (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) { e.preventDefault(); this.finishEdit(); }
@@ -1625,7 +1869,7 @@ export class Panel {
     const bw = Math.min(M.TEXT_BOX_W, pw - 8), f = this.fmt;
     const item = { t: "text", x: clamp(ctr.x - bw / 2, 4, pw - bw - 4), y: clamp(ctr.y, 0, ph - 30), w: bw, dir: f.dir, align: f.align, text, color: st.color, size: st.size, ...this.styleExtra() };
     this.setTool("select");
-    this.commit([...this.items, item], { select: this.items.length });
+    this.commit([...this.items, item], { select: this.items.length, flowIdx: this.items.length });
     return true;
   }
   async onImageFile() {
@@ -1710,7 +1954,7 @@ export class Panel {
   }
   setNotebook(pages, name) {
     this.finishEdit();
-    this.pages = pages.map((p) => ({ paper: p.paper, items: p.items.slice() }));
+    this.pages = pages.map((p) => M.clonePage(p)); this.layers.clear();
     this.refitNodes();
     this.name = name; this.history.clear(); this.dirty = false; this.cur = 0;
     this.showPage(0);
@@ -1727,7 +1971,7 @@ export class Panel {
     this.layout();
     if (scroll) this.scrollToPage(this.cur); else { this.clampView(); this.ui(); this.render(); }
   }
-  addPage() { this.structural(() => { this.pages.splice(this.cur + 1, 0, { paper: this.pages[this.cur].paper, items: [] }); this.cur++; }); }   // new page goes directly below the current one
+  addPage() { this.structural(() => { const src = this.pages[this.cur], np = { paper: src.paper, items: [] }; for (const k of P.PAGE_PROPS) if (src[k] !== undefined) np[k] = src[k]; this.pages.splice(this.cur + 1, 0, np); this.cur++; }); }   // new page goes directly below the current one
   async deletePage() {
     if (this.pages.length <= 1) { toast("A notebook needs at least one page."); return; }
     if (this.vp !== this.cur) this.setCur(this.vp);
@@ -1744,9 +1988,51 @@ export class Panel {
     if (j < 0 || j >= this.pages.length) return;
     this.structural(() => { [this.pages[this.cur], this.pages[j]] = [this.pages[j], this.pages[this.cur]]; this.cur = j; });
   }
+  /** Ruled text of these pages follows their line spacing (and the paper's rules). */
+  retunePage(pg) {
+    const pitch = P.paperSpec(pg).spacing;
+    pg.items = pg.items.map((d) => (d.t === "text" && d.ruled === true ? R.ruledNormalize(this.withPitch(d, pitch)) : d));
+  }
   setPaper(kind) {
     if (this.vp !== this.cur) this.setCur(this.vp);
-    if (kind !== this.pages[this.cur].paper) this.structural(() => { this.pages[this.cur].paper = kind; }, { scroll: false });
+    const pg = this.pages[this.cur];
+    if (kind === pg.paper) return;
+    this.structural(() => {
+      const old = pg.paper; pg.paper = kind;
+      if (!P.sameRuledFamily(old, kind)) delete pg.spacing;                    // every paper has its own natural spacing
+      delete pg.cue; delete pg.summary;
+      this.retunePage(pg); this.reflowPages([this.cur]);
+    }, { scroll: false });
+  }
+  /** Change line spacing, margin, direction ... of this page (or of all pages): one undo step. */
+  setPageSettings(patch, all = false) {
+    if (this.kind !== "nb") return;
+    if (this.vp !== this.cur) this.setCur(this.vp);
+    const idxs = all ? this.pages.map((_, i) => i) : [this.cur];
+    this.structural(() => {
+      for (const i of idxs) {
+        const pg = this.pages[i], p = { ...patch };
+        if ("dir" in p && !("margin" in p) && P.paperSpec(pg).margin !== "none") p.margin = p.dir === "rtl" ? "right" : "left";       // the margin follows the writing direction
+        if ("dir" in p && !("week_start" in p)) delete pg.week_start;
+        Object.assign(pg, p);
+        if ("spacing" in patch && P.SPACING[pg.paper] && patch.spacing === P.SPACING[pg.paper].def) delete pg.spacing;
+        this.retunePage(pg);
+      }
+      this.reflowPages(idxs);
+    }, { scroll: false });
+    if (patch.dir) { this.fmt = { dir: patch.dir, align: patch.dir === "rtl" ? "right" : "left" }; this.fmtKey = ""; }   // new text on this page follows the page
+  }
+  resetPageSettings(all = false) {
+    if (this.kind !== "nb") return;
+    if (this.vp !== this.cur) this.setCur(this.vp);
+    const idxs = all ? this.pages.map((_, i) => i) : [this.cur];
+    this.structural(() => { for (const i of idxs) { for (const k of P.PAGE_PROPS) delete this.pages[i][k]; this.retunePage(this.pages[i]); } this.reflowPages(idxs); }, { scroll: false });
+  }
+  openPaper() {
+    this.finishEdit();
+    if (this.vp !== this.cur) this.setCur(this.vp);
+    popup(this.paperBtn, paperContent({ getSpec: () => this.pageSpec(), names: P.PAPER_NAMES, count: this.pages.length,
+      onChange: (patch, all) => this.setPageSettings(patch, all), onReset: (all) => this.resetPageSettings(all) }));
   }
   async saveNotebook() {
     this.finishEdit();
@@ -1778,19 +2064,21 @@ export class Panel {
     }
   }
   viewState() { return { zoom: Math.round(this.view.scale * 1e4) / 1e4, auto_fit: this.view.fit, page: this.shown(), bars: this.barsOpen,
-    toolbar: { tool: this.tool, groups: JSON.parse(JSON.stringify(this.groups)), recent: [...this.recent], text_format: { ...this.fmt }, snap_lines: this.snapLines, shape: this.shapeKind, fill: this.fillOn, conn_style: this.connStyle, conn_arrow: this.connArrow, node_kind: this.nodeKind },
+    toolbar: { tool: this.tool, ...T.groupsToSaved(this.groups), recent: [...this.recent], text_format: { ...this.fmt }, snap_lines: this.snapLines, shape: this.shapeKind, fill: this.fill.shape, fill_mind: this.fill.mind, conn_style: this.connStyle, conn_arrow: this.connArrow, node_kind: this.nodeKind },
     ...(this.kind === "board" ? { center: [Math.round((this.cw / 2 - this.view.tx) / this.view.scale), Math.round((this.ch / 2 - this.view.ty) / this.view.scale)] } : {}) }; }
   restoreView(st) {
     if (!st || typeof st !== "object") return;
     const tb = st.toolbar;
     if (tb && typeof tb === "object") {
-      if (tb.groups && typeof tb.groups === "object") for (const k of Object.keys(this.groups)) this.groups[k] = M.sanitizeStyle(tb.groups[k], this.groups[k]);
+      this.groups = T.groupsFromSaved(tb, this.toolDefaultsNow(), M.sanitizeStyle);
+      this.curStyle = { ...(this.groups[GROUP_OF_TOOL[this.tool]] || this.curStyle) };
       if (Array.isArray(tb.recent)) this.recent = tb.recent.map((c) => { const p = typeof c === "string" ? M.parseHex(c) : null; return p ? M.toHex(...p) : null; }).filter(Boolean).slice(0, 10);
       const tf = tb.text_format;
       if (tf && typeof tf === "object") this.fmt = { dir: M.TEXT_DIRS.includes(tf.dir) ? tf.dir : this.fmt.dir, align: M.TEXT_ALIGNS.includes(tf.align) ? tf.align : this.fmt.align };
       if (typeof tb.snap_lines === "boolean") this.snapLines = tb.snap_lines;
       if (typeof tb.shape === "string" && M.SHAPE_KINDS.some((k) => k.id === tb.shape)) this.shapeKind = tb.shape;
-      if (typeof tb.fill === "boolean") this.fillOn = tb.fill;
+      if (typeof tb.fill === "boolean") this.fill.shape = tb.fill;
+      if (typeof tb.fill_mind === "boolean") this.fill.mind = tb.fill_mind;
       if (M.CONN_STYLES.includes(tb.conn_style)) this.connStyle = tb.conn_style;
       if (typeof tb.conn_arrow === "boolean") this.connArrow = tb.conn_arrow;
       if (M.NODE_KINDS.includes(tb.node_kind)) this.nodeKind = tb.node_kind;

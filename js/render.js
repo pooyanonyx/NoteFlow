@@ -1,9 +1,12 @@
 // Drawing of NoteFlow items to a 2D canvas. The same code draws on screen and for PDF export,
 // so what you see is what you export. Units are page points (1 pt = 1 user unit of the canvas).
 import * as M from "./model.js";
+import * as P from "./paper.js";
+import * as RT from "./richtext.js";
+import * as BD from "./bidi.js";
 
 // Vazirmatn (bundled, see css/app.css) covers the Arabic script block so Persian looks the same on every device.
-export const FONT_STACK = 'Vazirmatn, "Segoe UI", Roboto, "Noto Sans", "Noto Naskh Arabic", Tahoma, sans-serif';
+export const FONT_STACK = P.FONT_STACK;
 const RTL_RE = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
 const LTR_RE = /[A-Za-z]/;
 export const TEXT_PAD = 4;
@@ -16,8 +19,33 @@ export function isRtl(line) {                                // direction of the
 // ---------------------------------------------------------------- measuring
 let _mctx = null;
 export function measureCtx() {
-  if (!_mctx) _mctx = document.createElement("canvas").getContext("2d");
+  if (!_mctx) { _mctx = document.createElement("canvas").getContext("2d"); if ("textRendering" in _mctx) _mctx.textRendering = "geometricPrecision"; }   // (no hinting: widths scale exactly with the zoom, so lines wrap the same at every zoom)
   return _mctx;
+}
+// Text is measured through one function so the layout also runs without a browser (unit tests set their own measurer).
+let provider = null, layoutCache = new WeakMap();
+const metricsCache = new Map();
+export let fontEpoch = 0;                                        // bumped when a font finishes loading: cached layouts are measured again
+export function setMeasureProvider(p) { provider = p; metricsCache.clear(); layoutCache = new WeakMap(); }
+export function bumpFontEpoch() { fontEpoch++; metricsCache.clear(); layoutCache = new WeakMap(); }
+function widthOf(font, str) {
+  if (provider) return provider.width(font, str);
+  const c = measureCtx(); if (c.font !== font) c.font = font;
+  return c.measureText(str).width;
+}
+/** Ascent / descent of a font as the browser's line box uses them (the baseline of a line box is half-leading + ascent). */
+export function fontMetrics(font) {
+  let m = metricsCache.get(font);
+  if (!m) {
+    if (provider) m = provider.metrics(font);
+    else {
+      const c = measureCtx(); c.font = font;
+      const t = c.measureText("Hxg\u0645\u0639"), sz = parseFloat((/(\d+(?:\.\d+)?)px/.exec(font) || [0, 16])[1]);
+      m = { asc: t.fontBoundingBoxAscent ?? sz * 0.95, desc: t.fontBoundingBoxDescent ?? sz * 0.3 };
+    }
+    metricsCache.set(font, m);
+  }
+  return m;
 }
 /** Explicit {dir, align} of a text / note item, or null for old items (direction then detected per line). */
 export function fmtOf(d) {
@@ -69,7 +97,7 @@ export function layoutText(ctx, text, size, maxWidth = null, fmt = null, ruled =
 export function textInnerWidth(d) { return d.w ? Math.max(10, d.w - 2 * TEXT_PAD) : null; }
 /** [x0, y0, x1, y1] of a text item (including its padding). */
 export function textBox(d) {
-  const mw = textInnerWidth(d), L = layoutText(measureCtx(), d.text, d.size, mw, fmtOf(d), d.ruled === true);
+  const mw = textInnerWidth(d), L = layoutRich(d);
   return [d.x, d.y, d.x + (mw ? mw : L.width) + 2 * TEXT_PAD, d.y + L.height + 2 * TEXT_PAD];
 }
 export function noteTextWidth(d) { return Math.max(20, d.w - 16); }
@@ -87,22 +115,22 @@ export function noteNeededHeight(d, text = d.text) {
 //   the baseline of line i is           top + (i+1)*lh - RULED_LIFT     (a hair above the rule the line stands on)
 export const RULED_LEADING = 1.2;                       // a line needs at least this many font sizes of height, else it takes one more rule
 export const RULED_LIFT = 1;                            // baseline sits this far above its rule (points)
-export const ruledLH = (size) => M.RULE_PITCH * Math.max(1, Math.ceil(size * RULED_LEADING / M.RULE_PITCH - 1e-9));
-/** y of the last printed rule of a page of height h (same loop as drawPaper). */
-export function lastRuleY(h) { let y = M.RULE_TOP; while (y + M.RULE_PITCH < h - M.RULE_BOTTOM) y += M.RULE_PITCH; return y; }
+export const ruledLH = (size, pitch = M.RULE_PITCH) => pitch * Math.max(1, Math.ceil(size * RULED_LEADING / pitch - 1e-9));
+/** y of the last printed rule of a lined page of height h. */
+export function lastRuleY(h, pitch = M.RULE_PITCH, limit = h - M.RULE_BOTTOM) { return M.RULE_TOP + pitch * (Math.ceil((limit - M.RULE_TOP) / pitch - 1e-9) - 1); }
 /** Nearest position of a paper rule (the lattice also continues above the first printed rule). */
-export const nearestRule = (y) => M.RULE_TOP + M.RULE_PITCH * Math.round((y - M.RULE_TOP) / M.RULE_PITCH);
+export const nearestRule = (y, pitch = M.RULE_PITCH) => M.RULE_TOP + pitch * Math.round((y - M.RULE_TOP) / pitch);
 /** Item y for a new ruled text item that the user tapped at page y = py: the first line goes in the paper row that was tapped. */
-export function ruledYFromTap(py, size, pageH) {
-  let n = Math.max(-1, Math.floor((py - M.RULE_TOP) / M.RULE_PITCH));                         // row n lies between rule n and rule n + 1
-  const maxN = Math.floor((lastRuleY(pageH) - ruledLH(size) - M.RULE_TOP) / M.RULE_PITCH);     // the first line must still stand on a printed rule
+export function ruledYFromTap(py, size, pageH, pitch = M.RULE_PITCH, lastRule = lastRuleY(pageH, pitch)) {
+  let n = Math.max(-1, Math.floor((py - M.RULE_TOP) / pitch));                                  // row n lies between rule n and rule n + 1
+  const maxN = Math.floor((lastRule - ruledLH(size, pitch) - M.RULE_TOP) / pitch);               // the first line must still stand on a printed rule
   n = Math.min(n, Math.max(-1, maxN));
-  return M.RULE_TOP + n * M.RULE_PITCH - TEXT_PAD;
+  return M.RULE_TOP + n * pitch - TEXT_PAD;
 }
 /** A ruled text item moved onto the paper lattice (y -> the nearest row). Other items are returned unchanged. */
 export function ruledNormalize(d) {
   if (!d || d.t !== "text" || d.ruled !== true) return d;
-  const y = Math.round((nearestRule(d.y + TEXT_PAD) - TEXT_PAD) * 100) / 100;
+  const y = Math.round((nearestRule(d.y + TEXT_PAD, d.rp || M.RULE_PITCH) - TEXT_PAD) * 100) / 100;
   return y === d.y ? d : { ...d, y };
 }
 // Where does the browser put the baseline inside a line box? (distance from the top of a line box of the given line height to its baseline)
@@ -126,6 +154,7 @@ export function domBaseline(fontPx, lineHeightPx) {
 
 // ------------------------------------------------------------------- images
 const imageCache = new Map();           // base64 -> {img, ok, promise}
+export let assetEpoch = 0;              // bumped when a picture finishes decoding: cached page bitmaps that show its placeholder are drawn again
 let onImageLoaded = () => {};
 export function setImageLoadedCallback(fn) { onImageLoaded = fn; }
 export function getImage(data) {
@@ -134,8 +163,8 @@ export function getImage(data) {
     const img = new Image();
     e = { img, ok: false, failed: false };
     e.promise = new Promise((resolve) => {
-      img.onload = () => { e.ok = true; resolve(); onImageLoaded(); };
-      img.onerror = () => { e.failed = true; resolve(); onImageLoaded(); };
+      img.onload = () => { e.ok = true; assetEpoch++; resolve(); onImageLoaded(); };
+      img.onerror = () => { e.failed = true; assetEpoch++; resolve(); onImageLoaded(); };
     });
     img.src = "data:image/png;base64," + data;
     if (imageCache.size > 40) imageCache.delete(imageCache.keys().next().value);
@@ -183,28 +212,8 @@ const mixCss = (hex, bright) => {
 };
 
 // ------------------------------------------------------------------- paper
-export function drawPaper(ctx, w, h, kind) {
-  ctx.save();
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, w, h);
-  if (kind === "lined") {
-    ctx.strokeStyle = "#b9d3ee"; ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    for (let y = M.RULE_TOP; y < h - M.RULE_BOTTOM; y += M.RULE_PITCH) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
-    ctx.stroke();
-    ctx.strokeStyle = "#eba3a3"; ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.moveTo(62, 0); ctx.lineTo(62, h); ctx.stroke();
-  } else if (kind === "grid") {
-    ctx.strokeStyle = "#cdd6e2"; ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    for (let x = 20; x < w; x += 20) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
-    for (let y = 20; y < h; y += 20) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
-    ctx.stroke();
-  }
-  ctx.strokeStyle = "#8a8f98"; ctx.lineWidth = 0.8;
-  ctx.strokeRect(0, 0, w, h);
-  ctx.restore();
-}
+// (drawing, geometry and settings of the papers: paper.js; `kind` may be a paper name or a page object with its settings)
+export const drawPaper = P.drawPaper;
 
 // -------------------------------------------------------------------- text
 // Lines are drawn with the browser's own text engine (canvas fillText): it shapes Persian/Arabic letters and runs the
@@ -212,15 +221,173 @@ export function drawPaper(ctx, w, h, kind) {
 // direction and alignment are independent. fmt = null: old items (per-line detected direction, RTL lines right-aligned).
 function drawTextLines(ctx, L, x, y, blockWidth, size, fill, fmt = null, ruled = false) {
   ctx.font = `${size}px ${FONT_STACK}`;
-  ctx.textBaseline = ruled ? "alphabetic" : "top";            // ruled: the line stands on its rule (exact baseline), else the old centred-in-the-line placement
+  ctx.textBaseline = "alphabetic";                            // ruled: the line stands on its rule (exact baseline); else the baseline of a browser line box, so a text box and the canvas agree
+  if ("textRendering" in ctx) ctx.textRendering = "geometricPrecision";
   ctx.fillStyle = fill;
+  const fm = ruled ? null : fontMetrics(ctx.font);
   L.lines.forEach((ln, i) => {
-    const ly = ruled ? y + (i + 1) * L.lh - RULED_LIFT : y + i * L.lh + (L.lh - size) / 2;
+    const ly = ruled ? y + (i + 1) * L.lh - RULED_LIFT : y + i * L.lh + (L.lh - (fm.asc + fm.desc)) / 2 + fm.asc;
     const align = fmt ? fmt.align : (ln.rtl ? "right" : "left");
     ctx.direction = ln.rtl ? "rtl" : "ltr"; ctx.textAlign = align;
     const ax = align === "right" ? x + blockWidth : align === "center" ? x + blockWidth / 2 : x;
     ctx.fillText(ln.text, ax, ly);
   });
+  ctx.direction = "ltr"; ctx.textAlign = "left";
+}
+
+// ------------------------------------------------------------ rich text layout
+// One layout for every text box (plain or formatted, free or on the lines): paragraphs -> styled pieces -> words -> lines.
+// A line is {start, end, segs, w, h, base, rtl, indent, marker, para, num}: start / end are character offsets in the box's text (used for the
+// caret, for formatting and for continuing a long text on the next page); segs are the pieces to draw (single style each); h is the height of the
+// line's cell (a whole number of paper rules on ruled text, else 1.25 x the biggest font size on the line); base is the baseline inside the cell.
+export const listIndent = (size) => Math.max(18, size * 1.5);
+export const LINE_FACTOR = 1.25;
+const fontOf = (size, st) => `${st && st.i ? "italic " : ""}${st && st.b ? "bold " : ""}${size}px ${FONT_STACK}`;
+const isHyphen = (c) => c === "-" || c === "\u2010" || c === "\u2013" || c === "\u2014";
+const CJK_RE = /[\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF]/, NO_BREAK_BEFORE = /[)\]}\u00bb\u201d\u2019\u060c\u061b.,;:!?\u3002\u3001\u300d\u300f\uff09\u3011]/, NO_BREAK_AFTER = /[(\[{\u00ab\u201c\u2018\u300c\u300e\uff08\u3010]/;
+/** Cut a piece of text into chunks; br = a line may break after the chunk (after spaces, hyphens, between CJK characters), like the browser does. */
+export function chunks(str) {
+  const out = []; let i = 0; const n = str.length;
+  while (i < n) {
+    if (str[i] === " ") { let j = i; while (j < n && str[j] === " ") j++; out.push({ s: str.slice(i, j), space: true, br: true }); i = j; continue; }
+    let j = i, br = false;
+    while (j < n && str[j] !== " ") {
+      const c = str[j++], nx = str[j];
+      if (nx !== undefined && nx !== " " && ((isHyphen(c) && /[\p{L}\p{N}]/u.test(nx)) || ((CJK_RE.test(c) || CJK_RE.test(nx)) && !NO_BREAK_BEFORE.test(nx) && !NO_BREAK_AFTER.test(c)))) { br = true; break; }
+    }
+    out.push({ s: str.slice(i, j), space: false, br }); i = j;
+  }
+  return out;
+}
+function unitsOf(pieces, baseSize) {                 // pieces [{text, start, st}] -> units: words with the spaces that follow them
+  const units = []; let cur = null;
+  for (const pc of pieces) {
+    let off = pc.start; const size = pc.st.z ?? baseSize, font = fontOf(size, pc.st);
+    for (const ch of chunks(pc.text)) {
+      if (!cur) cur = { frags: [], space: null, wordW: 0, spaceW: 0 };
+      const frag = { text: ch.s, start: off, end: off + ch.s.length, st: pc.st, size, font, w: widthOf(font, ch.s) };
+      off = frag.end;
+      if (ch.space) { cur.space = frag; cur.spaceW = frag.w; units.push(cur); cur = null; }
+      else { cur.frags.push(frag); cur.wordW += frag.w; if (ch.br) { units.push(cur); cur = null; } }
+    }
+  }
+  if (cur) units.push(cur);
+  return units;
+}
+function expandOverlong(unit) {                      // a word wider than the line is broken between letters (each letter becomes a unit)
+  const out = [];
+  for (const f of unit.frags) {
+    let off = f.start;
+    for (const g of graphemes(f.text)) { const w = widthOf(f.font, g); out.push({ frags: [{ ...f, text: g, w, start: off, end: off + g.length }], space: null, wordW: w, spaceW: 0 }); off += g.length; }
+  }
+  if (unit.space) out.push({ frags: [], space: unit.space, wordW: 0, spaceW: unit.spaceW });
+  if (out.length) out[0].newline = true;
+  return out;
+}
+function mergeSegs(frags) {                           // neighbouring pieces of one style are drawn as one
+  const segs = [];
+  for (const f of frags) {
+    const last = segs[segs.length - 1];
+    if (last && last.size === f.size && last.font === f.font && !!last.st.u === !!f.st.u && last.end === f.start) { last.text += f.text; last.end = f.end; last.w += f.w; }
+    else segs.push({ text: f.text, start: f.start, end: f.end, st: f.st, size: f.size, font: f.font, w: f.w });
+  }
+  return segs;
+}
+function makeLine(frags, para, ctxp) {
+  let segs = mergeSegs(frags);
+  const start = segs.length ? segs[0].start : ctxp.start, end = segs.length ? segs[segs.length - 1].end : ctxp.end;
+  if (segs.length) {                                  // spaces at the end of a line hang outside it (not drawn, not counted), as in the browser
+    const last = segs[segs.length - 1], t = last.text.replace(/ +$/, "");
+    if (t !== last.text) { if (t) { last.draw = t; last.w = widthOf(last.font, t); } else { segs.pop(); } }
+  }
+  const maxSize = segs.length ? Math.max(...segs.map((x) => x.size)) : ctxp.size;
+  const big = segs.length ? segs.reduce((a, x) => (x.size >= a.size ? x : a), segs[0]) : null;
+  return { start, end, segs, w: segs.reduce((a, x) => a + x.w, 0), maxSize, bigFont: big ? big.font : fontOf(ctxp.size, {}), para: ctxp.pi, rtl: ctxp.rtl, indent: ctxp.indent };
+}
+function buildLayout(d, maxWidth) {
+  const size = d.size, pitch = d.rp || M.RULE_PITCH, ruled = d.ruled === true, fmt = fmtOf(d), text = String(d.text ?? "");
+  const content = RT.contentOf(d), paras = RT.paragraphRanges(text), sp = RT.spans(content);
+  const lines = []; let num = d.ns || 0, y = 0;
+  paras.forEach((p, pi) => {
+    const list = RT.listAt(content, pi), ptext = text.slice(p.start, p.end), rtl = fmt ? fmt.dir === "rtl" : isRtl(ptext);
+    const indent = list ? listIndent(size) : 0, avail = maxWidth == null ? Infinity : Math.max(10, maxWidth - indent), isCont = pi === 0 && d.cont === true;
+    let markerText = null;
+    if (list === "n") { if (!isCont) { num++; markerText = num + "."; } } else { num = 0; if (list === "b" && !isCont) markerText = "\u2022"; }
+    const pieces = sp.filter((r) => r.end > p.start && r.start < p.end).map((r) => ({ text: text.slice(Math.max(r.start, p.start), Math.min(r.end, p.end)), start: Math.max(r.start, p.start), st: r }));
+    let units = unitsOf(pieces, size);
+    if (isFinite(avail)) units = units.flatMap((u) => (u.wordW > avail + 1e-6 ? expandOverlong(u) : [u]));
+    const ctxp = { pi, rtl, indent, size, start: p.start, end: p.end };
+    let cur = [], w = 0; const rows = [];
+    for (const u of units) {
+      if (u.newline && cur.length) { rows.push(cur); cur = []; w = 0; }
+      if (cur.length && w + u.wordW > avail + 1e-6) { rows.push(cur); cur = []; w = 0; }
+      cur.push(...u.frags); if (u.space) cur.push(u.space); w += u.wordW + u.spaceW;
+    }
+    rows.push(cur);
+    rows.forEach((frs, ri) => {
+      const ln = makeLine(frs, p, ctxp);
+      ln.num = list === "n" ? num : 0; ln.first = ri === 0;
+      if (ri === 0 && markerText) { const first = ln.segs[0]; ln.marker = { text: markerText, size: first ? first.size : size, font: fontOf(first ? first.size : size, {}) }; }
+      ln.h = ruled ? pitch * Math.max(1, Math.ceil(ln.maxSize * RULED_LEADING / pitch - 1e-9)) : ln.maxSize * LINE_FACTOR;
+      if (ruled) ln.base = ln.h - RULED_LIFT; else { const m = fontMetrics(ln.bigFont); ln.base = (ln.h - (m.asc + m.desc)) / 2 + m.asc; }
+      ln.y = y; y += ln.h;
+      if (ln.segs.length > 1) visualize(ln);
+      lines.push(ln);
+    });
+  });
+  return { lines, height: y, width: Math.max(0, ...lines.map((l) => l.w + l.indent)), content };
+}
+/** Pieces of a line with more than one style, in visual (left to right) order, each of one direction. */
+function visualize(ln) {
+  const str = ln.segs.map((s) => s.draw ?? s.text).join(""), levels = BD.resolveLevels(str, ln.rtl), pcs = []; let pos = 0;
+  for (const s of ln.segs) {
+    const t = s.draw ?? s.text;
+    for (const r of BD.levelRuns(levels.subarray(pos, pos + t.length))) {
+      const text = t.slice(r.start, r.end);
+      pcs.push({ text, level: r.level, seg: s, w: r.start === 0 && r.end === t.length ? s.w : widthOf(s.font, text) });
+    }
+    pos += t.length;
+  }
+  ln.vis = BD.visualOrder(pcs); ln.visW = pcs.reduce((a, x) => a + x.w, 0);
+}
+/** Layout of a text item (cached per item: items are replaced, never edited in place). maxWidth null = no wrapping. */
+export function layoutRich(d, maxWidth = textInnerWidth(d)) {
+  if (maxWidth === textInnerWidth(d)) {
+    const hit = layoutCache.get(d);
+    if (hit) return hit;
+    const L = buildLayout(d, maxWidth); layoutCache.set(d, L); return L;
+  }
+  return buildLayout(d, maxWidth);
+}
+/** Draw a text item: every line with its own direction, alignment, list marker and styled pieces. */
+export function drawRichText(ctx, d) {
+  const L = layoutRich(d), mw = textInnerWidth(d), bw = mw ? mw : L.width, x0 = d.x + TEXT_PAD, fmt = fmtOf(d), fill = M.cssColor(d);
+  ctx.textBaseline = "alphabetic"; ctx.fillStyle = fill; if ("textRendering" in ctx) ctx.textRendering = "geometricPrecision";
+  const y0 = d.y + TEXT_PAD;
+  for (const ln of L.lines) {
+    const base = y0 + ln.y + ln.base, rtl = ln.rtl, cl = x0 + (rtl ? 0 : ln.indent), cr = x0 + bw - (rtl ? ln.indent : 0), cw = cr - cl;
+    const align = fmt ? fmt.align : (rtl ? "right" : "left");
+    if (ln.marker) {
+      ctx.font = ln.marker.font; ctx.direction = rtl ? "rtl" : "ltr"; ctx.textAlign = rtl ? "left" : "right";
+      ctx.fillText(ln.marker.text, rtl ? cr + ln.marker.size * 0.4 : cl - ln.marker.size * 0.4, base);
+    }
+    const W = ln.vis ? ln.visW : ln.w, left = align === "right" ? cr - W : align === "center" ? cl + (cw - W) / 2 : cl;
+    if (!ln.vis) {
+      const s = ln.segs[0]; if (!s) continue;
+      const t = s.draw ?? s.text;
+      ctx.font = s.font; ctx.direction = rtl ? "rtl" : "ltr"; ctx.textAlign = align;
+      ctx.fillText(t, align === "right" ? cr : align === "center" ? cl + cw / 2 : cl, base);
+      if (s.st.u) ctx.fillRect(left, base + s.size * 0.12, s.w, Math.max(0.8, s.size * 0.06));
+    } else {
+      let x = left; ctx.textAlign = "left";
+      for (const pc of ln.vis) {
+        ctx.font = pc.seg.font; ctx.direction = pc.level & 1 ? "rtl" : "ltr";
+        ctx.fillText(pc.text, x, base);
+        if (pc.seg.st.u) ctx.fillRect(x, base + pc.seg.size * 0.12, pc.w, Math.max(0.8, pc.seg.size * 0.06));
+        x += pc.w;
+      }
+    }
+  }
   ctx.direction = "ltr"; ctx.textAlign = "left";
 }
 
@@ -263,10 +430,15 @@ function adaptHex(hex, theme) {
   if (neutral && theme === "light" && lum > 190) return "#1a1a1a";
   return hex;
 }
+const themedCache = { dark: new WeakMap(), light: new WeakMap() };     // (the themed copy of an item is made once, so its cached text layout is reused)
 export function themed(d, theme) {
   if (!theme || d.t === "note" || d.t === "image" || d.t === "hl" || !d.color) return d;
+  const cache = themedCache[theme], hit = cache && cache.get(d);
+  if (hit) return hit;
   const c = adaptHex(d.color, theme), f = d.fill ? adaptHex(d.fill, theme) : d.fill;
-  return c === d.color && f === d.fill ? d : { ...d, color: c, ...(f !== undefined ? { fill: f } : {}) };
+  const out = c === d.color && f === d.fill ? d : { ...d, color: c, ...(f !== undefined ? { fill: f } : {}) };
+  if (cache) cache.set(d, out);
+  return out;
 }
 export const BOARD_COLORS = { white: "#ffffff", black: "#20252a" };
 export const boardTheme = (paper) => (paper === "black" ? "dark" : "light");
@@ -324,6 +496,7 @@ export function renderBoardRegion(canvas, items, { x, y, w, h, paper = "white", 
 }
 
 export function drawItem(ctx, d, opts = {}) {
+  stats.itemDraws++;
   if (opts.theme) d = themed(d, opts.theme);
   const t = d.t;
   ctx.save();
@@ -384,10 +557,7 @@ export function drawItem(ctx, d, opts = {}) {
     ctx.fillStyle = M.cssColor(d);
     ctx.fillRect(Math.min(d.x1, d.x2), Math.min(d.y1, d.y2), Math.abs(d.x2 - d.x1), Math.abs(d.y2 - d.y1));
   } else if (t === "text") {
-    if (!opts.skipText) {
-      const mw = textInnerWidth(d), fmt = fmtOf(d), ruled = d.ruled === true, L = layoutText(ctx, d.text, d.size, mw, fmt, ruled);
-      drawTextLines(ctx, L, d.x + TEXT_PAD, d.y + TEXT_PAD, mw ? mw : L.width, d.size, M.cssColor(d), fmt, ruled);
-    }
+    if (!opts.skipText) drawRichText(ctx, d);
   } else if (t === "note") {
     drawNote(ctx, d, opts.skipText);
   } else if (t === "image") {
@@ -406,6 +576,7 @@ export function drawItem(ctx, d, opts = {}) {
 }
 
 /** Draw a whole page: paper (notebook) and items. Used for export; 'scale' = canvas pixels per point. */
+export const stats = { itemDraws: 0, pageBuilds: 0 };    // (counters the tests use to check that finished pages are not drawn again while scrolling)
 export function renderPage(canvas, w, h, items, { paper = null, scale = 2 } = {}) {
   canvas.width = Math.round(w * scale);
   canvas.height = Math.round(h * scale);

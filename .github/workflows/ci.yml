@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm run test:unit
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install playwright pillow numpy
+      - run: playwright install --with-deps chromium
+      - run: python3 tests/run_e2e.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: { name: browser-test-output, path: /tmp/*.png, if-no-files-found: ignore }

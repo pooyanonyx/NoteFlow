@@ -70,18 +70,18 @@ with sync_playwright() as pw:
     a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; p.applyStyle('size', 18, false); p.setTool('text'); }")
     a.click_page(100, 100); a.type_lines(["HHH", "HHH", "HHH", "HHH", "HHH"])
     def overlay_check(label, tol=1.0):
-        info = a.ev("""() => { const p = noteflow.panels.nb, ta = p.ta, r = p.stage.getBoundingClientRect(), d = p.editedItem(), v = p.view, s = v.scale, [ox, oy] = p.origin(),
+        info = a.ev("""() => { const p = noteflow.panels.nb, ta = p.rt.el, r = p.stage.getBoundingClientRect(), d = p.editedItem(), v = p.view, s = v.scale, [ox, oy] = p.origin(),
           R = null; const ar = ta.getBoundingClientRect();
           return { d, v, ox, oy, rect: [ar.left, ar.top, ar.width, ar.height], stage: [r.left, r.top], scrollTop: ta.scrollTop, sh: ta.scrollHeight, ch: ta.clientHeight, lh: parseFloat(getComputedStyle(ta).lineHeight) }; }""")
         d = info["d"]; s = info["v"]["scale"]; lh = lh_of(d["size"]); top = d["y"] + PAD
-        n = len(a.ev("() => noteflow.panels.nb.ta.value.split('\\n')"))
+        n = len(a.ev("() => noteflow.panels.nb.rt.getContent().text.split('\\n')"))
         left, ttop, wd, ht = info["rect"]
         img = shot(a, clip={"x": left + 1, "y": ttop + 1, "width": min(30 * s, wd - 2), "height": ht - 2})
         cl = clusters(dark_rows(img))
         exp = [info["stage"][1] + info["v"]["ty"] + (info["oy"] + top + (i + 1) * lh - LIFT) * s - (ttop + 1) for i in range(n)]
         got = [b for (_, b) in cl]
         errs = [round(g - e, 2) for g, e in zip(got, exp)]
-        C.check("overlay baselines on rules " + label, len(got) == n and all(abs(x) <= tol for x in errs) and info["scrollTop"] == 0 and info["sh"] <= info["ch"] + 1,
+        C.check("editing: text baselines on rules " + label, len(got) == n and all(abs(x) <= tol for x in errs) and info["scrollTop"] == 0 and info["sh"] <= info["ch"] + 1,
                 "css-px errors per line %s, scale %.3f, scrollTop %s" % (errs, s, info["scrollTop"]))
         return info
     overlay_check("(5 lines, fit zoom)")
@@ -105,7 +105,7 @@ with sync_playwright() as pw:
     # ---- 6. text does not move when the editor closes (overlay vs committed canvas, same screen pixels)
     a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; p.setTool('text'); }")
     a.click_page(100, 100); a.type_lines(["HHHHHHHH", "HHHHHHHH", "HHHHHHHH"])
-    info = a.ev("() => { const p = noteflow.panels.nb, ar = p.ta.getBoundingClientRect(); return [ar.left, ar.top, ar.width, ar.height]; }")
+    info = a.ev("() => { const p = noteflow.panels.nb, ar = p.rt.el.getBoundingClientRect(); return [ar.left, ar.top, ar.width, ar.height]; }")
     clip = {"x": info[0] + 2, "y": info[1] + 2, "width": 120, "height": info[3] - 4}
     before = clusters(dark_rows(shot(a, clip=clip)))
     a.finish()

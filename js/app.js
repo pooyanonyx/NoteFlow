@@ -4,7 +4,7 @@ import * as K from "./keys.js";
 import { initTouchTips } from "./tips.js";
 import * as WS from "./workspace.js";
 import { Panel } from "./panel.js";
-import { setImageLoadedCallback } from "./render.js";
+import { setImageLoadedCallback, bumpFontEpoch } from "./render.js";
 import { el, icon, toast, dialog, popup, closePopup } from "./ui.js";
 
 const PER_PANEL = 430;                               // a workspace with n panels needs n * 430 px, below that one panel is shown at a time (tabs)
@@ -41,10 +41,12 @@ export class App {
     this.panels = { pdf: new Panel(this, "pdf", "pdf", "PDF"), pdf2: new Panel(this, "pdf2", "pdf", "PDF 2"),
       nb: new Panel(this, "nb", "nb", "Notebook"), nb2: new Panel(this, "nb2", "nb", "Notebook 2"),
       board: new Panel(this, "board", "board", "Board"), board2: new Panel(this, "board2", "board", "Board 2") };
+    this._partIds = new WeakMap(); this._written = new Set();
     this.autosaveOk = true; this.autosaveTimer = 0; this.wsName = null; this.installEvt = null;
     setImageLoadedCallback(() => { for (const p of Object.values(this.panels)) p.render(); });
     // the bundled Persian font is used by the canvas too: redraw once it has loaded
-    document.fonts?.load?.('16px Vazirmatn', "\u067e\u0686\u0698\u06af").then(() => { for (const p of Object.values(this.panels)) p.render(); }).catch(() => {});   // pictures that finish decoding appear at once
+    document.fonts?.addEventListener?.("loadingdone", () => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); });         // text is measured again with the real font
+    document.fonts?.load?.('16px Vazirmatn', "\u067e\u0686\u0698\u06af").then(() => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); }).catch(() => {});   // pictures that finish decoding appear at once
     this.buildDom();
     this.refreshLayout();
     window.addEventListener("resize", () => this.refreshLayout());
@@ -327,14 +329,14 @@ export class App {
     const P = this.panels;
     return { window: { layout: [...this.order], view: this.viewMode, tab: this.tab, type: M.workspaceTypeOf(this.order) || "custom" }, board: P.board.viewState(), board2: P.board2.viewState(), pdf: P.pdf.viewState(), pdf2: P.pdf2.viewState(), notebook: P.nb.viewState(), notebook2: P.nb2.viewState() };
   }
-  nbPages(p) { p.finishEdit(); return p.pages.map((q) => ({ paper: q.paper, items: q.items.slice() })); }
+  nbPages(p) { p.finishEdit(); return p.pages.map((q) => M.pageToJson(q)); }
   /** What belongs to the workspace. Default: only the panels of the current structure (a PDF-only workspace has no notebook, and vice versa).
    *  all: true (session backup) also includes panels that were taken out of the structure, so nothing is lost if the tab is reloaded. */
-  collect({ all = false } = {}) {
+  collect({ all = false, lite = false } = {}) {
     const P = this.panels, inc = (k) => all || this.order.includes(k);
     return { pdf: inc("pdf") ? P.pdf.workspaceData() : null, pdf2: inc("pdf2") ? P.pdf2.workspaceData() : null,
-      notebook: inc("nb") ? this.nbPages(P.nb) : null,
-      notebook2: this.order.includes("nb2") || (all && !this.isPristine(P.nb2)) ? this.nbPages(P.nb2) : null,
+      notebook: inc("nb") && !lite ? this.nbPages(P.nb) : null,
+      notebook2: !lite && (this.order.includes("nb2") || (all && !this.isPristine(P.nb2))) ? this.nbPages(P.nb2) : null,
       board: inc("board") ? P.board.boardData() : null,
       board2: this.order.includes("board2") || (all && !this.isPristine(P.board2)) ? P.board2.boardData() : null,
       settings: this.settings(), type: M.workspaceTypeOf(this.order) || "custom" };
@@ -405,12 +407,23 @@ export class App {
   // ------------------------------------------------------------- autosave
   scheduleAutosave() { clearTimeout(this.autosaveTimer); this.autosaveTimer = setTimeout(() => this.autosave(), 2500); }
   flushAutosave() { if (this.autosaveTimer) { clearTimeout(this.autosaveTimer); this.autosave(true); } }
+  /** Id under which the items of a page are kept in the session backup. Items are never edited in place (an edit makes a new array), so an unchanged page keeps its id. */
+  partId(items) {
+    let id = this._partIds.get(items);
+    if (!id) { id = "pg:" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); this._partIds.set(items, id); }
+    return id;
+  }
+  /** The session backup is written page by page: only pages whose items changed since the last backup are written again (a large notebook is not copied in full every few seconds). */
   async autosave(force = false) {
     this.autosaveTimer = 0;
     // collecting the data closes any open text editor: never do that in the middle of typing (wait until the user is done)
     if (!force && Object.values(this.panels).some((p) => p.editing)) { this.scheduleAutosave(); return; }
     try {
-      const d = this.collect({ all: true }), rec = { version: 1, saved: Date.now(), settings: d.settings, notebook: d.notebook, notebook2: d.notebook2, board: d.board, board2: d.board2 };
+      const d = this.collect({ all: true, lite: true }), rec = { version: 2, saved: Date.now(), settings: d.settings, board: d.board, board2: d.board2 };
+      const used = new Set(), fresh = [];
+      const ref = (items) => { const id = this.partId(items); used.add(id); if (!this._written.has(id)) fresh.push([id, items]); return id; };
+      const nb = (key) => { const p = this.panels[key]; p.finishEdit(); return p.pages.map((q) => ({ ...M.pageMeta(q), part: ref(q.items) })); };
+      rec.notebook = nb("nb"); rec.notebook2 = !this.isPristine(this.panels.nb2) || this.order.includes("nb2") ? nb("nb2") : null;
       const keep = new Set();
       for (const key of ["pdf", "pdf2"]) {
         const p = d[key];
@@ -419,17 +432,27 @@ export class App {
         panel.hash = panel.hash || await WS.sha256Hex(p.source);
         const k = "pdf:" + panel.hash; keep.add(k);
         if (!(await idb.get(k))) await idb.set(k, p.source);
-        rec[key] = { name: p.name, hash: panel.hash, pages: p.pages };
+        rec[key] = { name: p.name, hash: panel.hash, parts: p.pages.map((items) => ref(items)) };
       }
-      await idb.set("session", rec);
-      for (const k of await idb.keys()) if (String(k).startsWith("pdf:") && !keep.has(k)) await idb.del(k);
+      for (const [id, items] of fresh) { await idb.set(id, items); this._written.add(id); }
+      await idb.set("session", rec);                                   // (written last: it only ever points at parts that exist)
+      for (const k of await idb.keys()) {
+        const s = String(k);
+        if (s.startsWith("pdf:") && !keep.has(k)) await idb.del(k);
+        else if (s.startsWith("pg:") && !used.has(s)) { await idb.del(k); this._written.delete(s); }
+      }
       this.autosaveOk = true;
-    } catch (e) { console.warn("autosave failed", e); this.autosaveOk = false; }
+    } catch (e) { console.warn("autosave failed", e); this.autosaveOk = false; this._written.clear(); }
   }
   async restoreAutosave() {
     try {
       const rec = await idb.get("session");
-      if (!rec || rec.version !== 1) return false;
+      if (!rec || (rec.version !== 1 && rec.version !== 2)) return false;
+      if (rec.version === 2) {                                         // pages are stored separately: put them back together
+        const nb = async (pgs) => (pgs ? Promise.all(pgs.map(async (m) => { const items = await idb.get(m.part); if (!Array.isArray(items)) throw new Error("backup page missing"); return { ...m, items }; })) : null);
+        rec.notebook = await nb(rec.notebook); rec.notebook2 = await nb(rec.notebook2);
+        for (const key of ["pdf", "pdf2"]) if (rec[key]) { rec[key].pages = await Promise.all(rec[key].parts.map((id) => idb.get(id))); if (rec[key].pages.some((x) => !Array.isArray(x))) throw new Error("backup page missing"); }
+      }
       const bd = (b) => (b ? M.parseBoard(M.boardToJson(b)) : null);       // sanitised copy
       const ws = { settings: rec.settings || {}, board: bd(rec.board), board2: bd(rec.board2), notebook: M.parseNotebook(M.notebookToJson(rec.notebook)), notebook2: rec.notebook2 ? M.parseNotebook(M.notebookToJson(rec.notebook2)) : null, pdf: null, pdf2: null };
       for (const key of ["pdf", "pdf2"]) {

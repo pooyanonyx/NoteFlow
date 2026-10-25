@@ -1,8 +1,9 @@
 """Shared helpers: start Chromium on the local static server, drive the real UI, and measure rendered pixels."""
 from playwright.sync_api import sync_playwright
 
-URL = "http://127.0.0.1:8765/index.html"
-CHROME = None   # None = the Chromium that Playwright installed; or set a path to a Chromium binary
+import os
+URL = os.environ.get("NOTEFLOW_URL", "http://127.0.0.1:8765/index.html")      # tests/run_e2e.py starts its own server and sets this
+CHROME = os.environ.get("NOTEFLOW_CHROME") or None
 
 class App:
     def __init__(self, pw, width=1400, height=900, dpr=1, url=URL):

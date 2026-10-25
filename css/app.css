@@ -141,3 +141,30 @@ input.hex { grid-column:2 / span 2; text-transform:uppercase; }
 #app[data-narrow="true"] .topbar .lbl { display:none; }
 #app[data-narrow="true"] .topbar .brand { display:none; }
 #app[data-narrow="true"] .segbtn { padding:5px 12px; }
+
+/* ---- rich text editor: the text is drawn on the page canvas, this element only provides caret, selection and input (its own text is invisible) */
+.editor.rt { position:absolute; z-index:5; margin:0; padding:0; box-sizing:content-box; border:1.5px dashed var(--accent); border-radius:2px; outline:none; background:transparent;
+  white-space:pre-wrap; overflow-wrap:anywhere; word-break:normal; overflow:visible; color:transparent; -webkit-text-fill-color:transparent; caret-color:var(--accent);
+  text-rendering:geometricPrecision; font-kerning:normal; cursor:text; -webkit-user-select:text; user-select:text; -webkit-text-size-adjust:none; }
+.editor.rt[hidden] { display:none; }
+.editor.rt .rp { margin:0; padding:0; min-height:0; }
+.editor.rt span { color:transparent; -webkit-text-fill-color:transparent; }
+.editor.rt [data-b="1"] { font-weight:700; } .editor.rt [data-i="1"] { font-style:italic; } .editor.rt [data-u="1"] { text-decoration:underline; }
+.editor.rt ::selection, .editor.rt::selection { background:rgba(25,118,210,.32); color:transparent; -webkit-text-fill-color:transparent; }
+
+/* ---- rich text buttons, size label, paper settings, reset buttons */
+.richgrp { display:inline-flex; align-items:center; gap:2px; } .richgrp[hidden] { display:none; }
+.sizelbl { min-width:26px; text-align:center; font-size:12px; font-variant-numeric:tabular-nums; color:var(--muted, #555); }
+.resetrow { display:flex; justify-content:flex-end; margin-top:2px; }
+.btn.reset { gap:5px; } .btn.reset:disabled { opacity:.45; }
+.msep { height:1px; background:var(--line); margin:4px 0; }
+.shapemenu { display:flex; flex-direction:column; gap:6px; }
+.papermenu { display:flex; flex-direction:column; gap:10px; width:min(340px, calc(100vw - 40px)); }
+.papermenu .ptitle { font-weight:600; font-size:13px; }
+.papermenu .prow { display:flex; flex-direction:column; gap:4px; }
+.papermenu .segmini { display:flex; gap:4px; flex-wrap:wrap; } .papermenu .segmini .btn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+.papermenu .blab { font-size:12px; color:var(--muted, #555); }
+.papermenu .hint { font-size:12px; color:var(--muted, #666); }
+.papermenu .allrow { display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; }
+select.paper { max-width:150px; }
+.fmtgrp, .richgrp { flex-wrap:wrap; row-gap:2px; max-width:100%; }     /* narrow screens: the text format buttons wrap instead of running off the screen */
