@@ -44,3 +44,11 @@ test("old workspaces: the shared draw set is copied to every tool that shared it
   assert.deepEqual(again, g);
   g.pen.color = "#ff0000"; assert.equal(T.groupsFromSaved(T.groupsToSaved(g), def, san).text.color, "#0000ff");   // new files keep tools apart
 });
+
+test("Text tool defaults: bold / italic / underline / list are part of the tool's own defaults and are cleaned when loaded", () => {
+  assert.deepEqual(T.EXTRAS_DEFAULT.text, { b: false, i: false, u: false, list: "" });
+  assert.deepEqual(T.sanitizeTextStyle({ b: true, i: "yes", u: 1, list: "n" }), { b: true, i: false, u: false, list: "n" });
+  assert.deepEqual(T.sanitizeTextStyle({ list: "x" }), T.EXTRAS_DEFAULT.text);
+  assert.deepEqual(T.sanitizeTextStyle(null), T.EXTRAS_DEFAULT.text);
+  assert.ok(M.TEXT_BOX_MIN_W > 0 && M.TEXT_BOX_MIN_W < M.TEXT_BOX_W);
+});

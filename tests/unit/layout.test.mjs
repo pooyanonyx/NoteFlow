@@ -43,3 +43,23 @@ test("layout is cached per item and unaffected by an unrelated copy", () => {
   const d = text({ text: "cache me" }); assert.equal(R.layoutRich(d), R.layoutRich(d));
   assert.notEqual(R.layoutRich({ ...d }), R.layoutRich(d));
 });
+
+test("a word wider than the line breaks where the SHAPED text stops fitting, not by summing single letters", async () => {
+  const { useKernedMeasure } = await import("./helpers.mjs");
+  const K = useKernedMeasure();
+  // 10 px letters, "AV"/"VA" pairs 4 px tighter: "AVAVAVA" (7 letters) is 46 px, summing letters would say 70 px and break after 4
+  const d = text({ w: 58, size: 20, text: "AVAVAVAVAVAV" }), L = K.layoutRich(d);      // inner width 50
+  assert.equal(L.lines[0].segs.map((s) => s.text).join(""), "AVAVAVA");
+  assert.equal(L.lines.map((l) => l.segs.map((s) => s.text).join("")).join(""), "AVAVAVAVAVAV");     // nothing lost, offsets continuous
+  assert.ok(L.lines.every((l, i) => i === 0 || l.start === L.lines[i - 1].end));
+  useStubMeasure();
+});
+test("a word that does not fit the rest of a line moves to its own line first, then breaks", () => {
+  const L = R.layoutRich(text({ w: 68, size: 10, text: "ab cdefghijklmnopqrstu" }));            // inner 60 = 12 letters
+  assert.deepEqual(L.lines.map((l) => l.segs.map((s) => s.draw ?? s.text).join("")), ["ab", "cdefghijklmn", "opqrstu"]);
+});
+test("styled pieces inside a long word keep their offsets when it breaks", () => {
+  const d = text({ w: 48, size: 10, text: "abcdefghijklmnop", runs: [{ s: "abcdef" }, { s: "ghijkl", b: 1 }, { s: "mnop" }] }), L = R.layoutRich(d);
+  assert.equal(L.lines.map((l) => l.segs.map((s) => s.text).join("")).join(""), "abcdefghijklmnop");
+  assert.ok(L.lines.every((l) => l.segs.every((s) => d.text.slice(s.start, s.end) === s.text)));
+});

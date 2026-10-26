@@ -274,15 +274,27 @@ function unitsOf(pieces, baseSize) {                 // pieces [{text, start, st
   if (cur) units.push(cur);
   return units;
 }
-function expandOverlong(unit) {                      // a word wider than the line is broken between letters (each letter becomes a unit)
-  const out = [];
+/** Break a word that is wider than a whole line: as many letters as really fit (measured as the shaped text, like the browser's text box does: kerning and the joining of Persian / Arabic letters count), then the next line. */
+function breakOverlong(unit, avail, cur, w, rows) {
+  const eps = 1e-6;
   for (const f of unit.frags) {
-    let off = f.start;
-    for (const g of graphemes(f.text)) { const w = widthOf(f.font, g); out.push({ frags: [{ ...f, text: g, w, start: off, end: off + g.length }], space: null, wordW: w, spaceW: 0 }); off += g.length; }
+    let text = f.text, start = f.start;
+    while (text) {
+      const room = avail - w, whole = widthOf(f.font, text);
+      if (whole <= room + eps) { cur.push({ ...f, text, start, end: start + text.length, w: whole }); w += whole; break; }
+      const g = graphemes(text), ends = []; let pos = 0;
+      for (const x of g) { pos += x.length; ends.push(pos); }
+      let lo = 0, hi = ends.length - 1;                              // the most letters whose shaped width fits the room (binary search: widths only grow)
+      while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (widthOf(f.font, text.slice(0, ends[mid - 1])) <= room + eps) lo = mid; else hi = mid - 1; }
+      if (lo === 0) { if (cur.length) { rows.push(cur); cur = []; w = 0; continue; } lo = 1; }   // not even one letter fits an empty line: take one anyway
+      const head = text.slice(0, ends[lo - 1]);
+      cur.push({ ...f, text: head, start, end: start + head.length, w: widthOf(f.font, head) });
+      rows.push(cur); cur = []; w = 0;
+      text = text.slice(head.length); start += head.length;
+    }
   }
-  if (unit.space) out.push({ frags: [], space: unit.space, wordW: 0, spaceW: unit.spaceW });
-  if (out.length) out[0].newline = true;
-  return out;
+  if (unit.space) { cur.push(unit.space); w += unit.spaceW; }
+  return { cur, w };
 }
 function mergeSegs(frags) {                           // neighbouring pieces of one style are drawn as one
   const segs = [];
@@ -314,12 +326,15 @@ function buildLayout(d, maxWidth) {
     let markerText = null;
     if (list === "n") { if (!isCont) { num++; markerText = num + "."; } } else { num = 0; if (list === "b" && !isCont) markerText = "\u2022"; }
     const pieces = sp.filter((r) => r.end > p.start && r.start < p.end).map((r) => ({ text: text.slice(Math.max(r.start, p.start), Math.min(r.end, p.end)), start: Math.max(r.start, p.start), st: r }));
-    let units = unitsOf(pieces, size);
-    if (isFinite(avail)) units = units.flatMap((u) => (u.wordW > avail + 1e-6 ? expandOverlong(u) : [u]));
+    const units = unitsOf(pieces, size);
     const ctxp = { pi, rtl, indent, size, start: p.start, end: p.end };
     let cur = [], w = 0; const rows = [];
     for (const u of units) {
-      if (u.newline && cur.length) { rows.push(cur); cur = []; w = 0; }
+      if (isFinite(avail) && u.wordW > avail + 1e-6) {                // wider than a line: it starts on its own line, then breaks where the letters stop fitting
+        if (cur.length) { rows.push(cur); cur = []; w = 0; }
+        ({ cur, w } = breakOverlong(u, avail, cur, w, rows));
+        continue;
+      }
       if (cur.length && w + u.wordW > avail + 1e-6) { rows.push(cur); cur = []; w = 0; }
       cur.push(...u.frags); if (u.space) cur.push(u.space); w += u.wordW + u.spaceW;
     }

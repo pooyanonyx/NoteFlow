@@ -12,6 +12,8 @@ node --test "tests/unit/*.test.mjs"
 | --- | --- |
 | `test_ruled.py`, `test_extra.py` | writing on the lines of lined paper (baselines on rules at every zoom / dpi), snap to lines, boards |
 | `test_text.py` | rich text, "what you see while typing is what is saved", save / reopen, text continuing across pages |
+| `test_text_settings.py` | Text tool formatting (bold / italic / underline / size / list) set before a box exists and applied to new boxes |
+| `test_wrap_caret.py` | lines can be filled up to the page edge; the invisible editor and the canvas break lines in the same places, so the caret stays next to the text (zoom, dpr, size, Persian / English, inherited styles) |
 | `test_tools_paper.py` | Reset to default per tool, independent tool settings, paper types and settings, right-to-left notebooks |
 | `test_perf.py` | large notebooks: page bitmap cache, bounded memory, incremental autosave |
 | `test_regress.py` | notes, mind maps, boards, PDFs, drawing / moving / erasing, keyboard isolation |

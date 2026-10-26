@@ -59,7 +59,7 @@ export class Panel {
     this.sizeJobs = new Map(); this.offs = null; this.docW = 595; this.docH = 842; this.vp = 0; this.vpLock = null; this.fling = 0;
     this.fmt = { dir: "ltr", align: "left" }; this.fmtKey = "";      // text direction / alignment used for new text
     this.snapLines = true;                                          // text written on lined paper follows the printed rules (see render.js "writing on ruled paper")
-    this.shapeKind = "rect"; this.fill = { shape: false, mind: false }; this.fillKey = "";  // Shapes tool: active shape + Fill switch (Shapes and Mind map keep their own)
+    this.shapeKind = "rect"; this.fill = { shape: false, mind: false }; this.textStyle = { ...T.EXTRAS_DEFAULT.text }; this.fillKey = "";  // Shapes tool: active shape + Fill switch (Shapes and Mind map keep their own)
     this._bc = new WeakMap(); this.eraserPos = null;
     this.connStyle = "curve"; this.connArrow = true; this.nodeKind = "round"; this.mindKey = ""; this.linkTarget = null; this._nm = null;   // mind map defaults
     if (kind === "nb") { this.layout(); this.view.ty = 14; }
@@ -304,7 +304,7 @@ export class Panel {
     const box = brushContent({ getStyle: () => this.curStyle, widthEnabled: this.tool !== "hltext", eraser: this.tool === "eraser",
       onInput: (k, v) => this.applyStyle(k, v, false), onCommit: (k, v) => this.applyStyle(k, v, true),
       ...(g ? { onReset: () => this.resetTool(tool), isDefault: () => this.isToolDefault(tool),
-        resetTitle: `Restore the ${T.GROUP_LABEL[g]} settings (colour, thickness, opacity, brightness, text size${g === "shape" ? ", shape, fill" : g === "mind" ? ", connectors, nodes, fill" : ""}) to their defaults. Other tools are not changed.` } : {}) });
+        resetTitle: `Restore the ${T.GROUP_LABEL[g]} settings (colour, thickness, opacity, brightness, text size${g === "text" ? ", bold / italic / underline / list" : g === "shape" ? ", shape, fill" : g === "mind" ? ", connectors, nodes, fill" : ""}) to their defaults. Other tools are not changed.` } : {}) });
     this.brushBox = box;
     popup(this.brushBtn, box, { onClose: () => { if (this.brushBox === box) this.brushBox = null; } });
   }
@@ -314,6 +314,7 @@ export class Panel {
   isToolDefault(tool = this.tool) {
     const g = GROUP_OF_TOOL[tool]; if (!g) return true;
     if (!T.sameStyle(this.groups[g], this.toolDefaultsNow()[g])) return false;
+    if (g === "text") return Object.keys(T.EXTRAS_DEFAULT.text).every((k) => this.textStyle[k] === T.EXTRAS_DEFAULT.text[k]);
     if (g === "shape") return this.shapeKind === T.EXTRAS_DEFAULT.shape.shapeKind && this.fill.shape === T.EXTRAS_DEFAULT.shape.fill;
     if (g === "mind") { const e = T.EXTRAS_DEFAULT.mind; return this.connStyle === e.connStyle && this.connArrow === e.connArrow && this.nodeKind === e.nodeKind && this.fill.mind === e.fill; }
     return true;
@@ -323,6 +324,7 @@ export class Panel {
     const g = GROUP_OF_TOOL[tool]; if (!g) return false;
     this.groups[g] = { ...this.toolDefaultsNow()[g] };
     if (GROUP_OF_TOOL[this.tool] === g) this.curStyle = { ...this.groups[g] };
+    if (g === "text") this.textStyle = { ...T.EXTRAS_DEFAULT.text };
     if (g === "shape") { this.shapeKind = T.EXTRAS_DEFAULT.shape.shapeKind; this.fill.shape = T.EXTRAS_DEFAULT.shape.fill; this.updateShapeBtn(); }
     if (g === "mind") { const e = T.EXTRAS_DEFAULT.mind; this.connStyle = e.connStyle; this.connArrow = e.connArrow; this.nodeKind = e.nodeKind; this.fill.mind = e.fill; }
     this.fillKey = ""; this.mindKey = ""; this.fmtKey = ""; this.updateColorDot();
@@ -1078,9 +1080,13 @@ export class Panel {
     if (idx !== null && this.items[idx].t === t) { this.selected = idx; this.startEdit(idx); return; }
     if (t === "text") {
       const geo = this.kind === "nb" ? this.pageGeo() : null, onLines = !!geo && geo.ruled && this.snapLines;
-      const lo = onLines ? geo.x0 : 4, hi = onLines ? geo.x1 : w - 4;                // on ruled paper new text stays out of the margin / cue column
-      const bw = Math.min(M.TEXT_BOX_W, hi - lo), f = this.fmt;     // new text is a box of fixed width, so alignment is visible; RTL boxes grow leftwards from the tap
-      const proto = { t: "text", x: clamp(f.dir === "rtl" ? p.x - bw : p.x, lo, Math.max(lo, hi - bw)), y: clamp(p.y - st.size * 0.7, 0, h - 10), w: bw, dir: f.dir, align: f.align,
+      const nb = this.kind === "nb", lo = onLines ? geo.x0 : nb ? 12 : 4, hi = onLines ? geo.x1 : nb ? w - 12 : w - 4;   // on ruled paper new text stays out of the margin / cue column; on a notebook never closer than 12 to the page edge
+      const f = this.fmt;
+      // New text is a box of fixed width, so alignment is visible. On a notebook it reaches the edge of the writing area (the page edge / red margin), so a line can be
+      // filled like on paper before it wraps; elsewhere it is the usual 300. RTL boxes grow leftwards from the tap.
+      const room = f.dir === "rtl" ? p.x - lo : hi - p.x, r2 = (v) => Math.round(v * 100) / 100;
+      const bw = r2(this.kind === "nb" ? Math.min(hi - lo, Math.max(M.TEXT_BOX_MIN_W, room)) : Math.min(M.TEXT_BOX_W, hi - lo));
+      const proto = { t: "text", x: r2(clamp(f.dir === "rtl" ? p.x - bw : p.x, lo, Math.max(lo, hi - bw))), y: clamp(p.y - st.size * 0.7, 0, h - 10), w: bw, dir: f.dir, align: f.align,
         text: "", color: st.color, size: st.size, ...this.styleExtra() };
       if (this.linedPage()) {                                  // ruled paper: the first line goes in the tapped row, every line rests on a rule
         proto.ruled = this.snapLines;
@@ -1490,6 +1496,7 @@ export class Panel {
       if (this.rstateItem !== d) { const c = RT.contentOf(d), st = RT.styleOfRange(c, 0, c.text.length, d.size); st.list = c.lists && c.lists.every((x) => x === c.lists[0]) ? c.lists[0] : ""; this.rstate = st; this.rstateItem = d; }
       return this.rstate;
     }
+    if (this.tool === "text") { const ts = this.textStyle; return { b: ts.b, i: ts.i, u: ts.u, list: ts.list, z: this.curStyle.size }; }       // Text tool, nothing open: the settings the next new text box gets
     return { b: false, i: false, u: false, list: "", z: this.curStyle.size };
   }
   /** Rich text commands (toolbar and keys). While editing they apply to the selection (or to what is typed next); on a selected box, to the whole box. */
@@ -1504,13 +1511,25 @@ export class Panel {
       this.rt.focus(); return;
     }
     const d = this.textTarget();
-    if (!d || d.t !== "text") return;
+    if (!d || d.t !== "text") {                          // no text box open or selected: these are the settings of the Text tool, used by the next box that is created
+      if (this.tool === "text") this.setTextDefault(kind, kind === "bigger" || kind === "smaller" ? step(this.curStyle.size, kind === "bigger" ? 1 : -1) : null);
+      return;
+    }
     let c = RT.contentOf(d), n = null;
     if (kind === "b" || kind === "i" || kind === "u") { const all = RT.styleOfRange(c, 0, c.text.length, d.size)[kind] === true; c = RT.applyAll(c, { [kind]: !all }); n = F.withContent(d, c); }
     else if (kind === "ul" || kind === "ol") { c = RT.toggleList(c, 0, c.text.length, kind === "ul" ? "b" : "n"); n = F.withContent(d, c); }
     else { const z = step(d.size, kind === "bigger" ? 1 : -1); n = F.withContent({ ...d, size: z }, RT.applyAll(c, { z: null })); if (n.ruled === true) n = R.ruledNormalize(n); }
     if (n && JSON.stringify(n) !== JSON.stringify(d)) { const items = this.items.slice(); items[this.selected] = n; this.commit(items, { keepSel: true, flowIdx: this.selected }); }
     this.fmtKey = ""; this.rstateItem = null; this.render();
+  }
+  /** Bold / italic / underline / list / size chosen on the Text tool while no text box is open (they are kept with the tool, saved, and reset by its Reset to default). */
+  setTextDefault(kind, size) {
+    const ts = this.textStyle;
+    if (kind === "b" || kind === "i" || kind === "u") ts[kind] = !ts[kind];
+    else if (kind === "ul") ts.list = ts.list === "b" ? "" : "b";
+    else if (kind === "ol") ts.list = ts.list === "n" ? "" : "n";
+    else if (size !== null && size !== this.curStyle.size) this.applyStyle("size", size, true);
+    this.fmtKey = ""; this.render();
   }
   setFmt(patch) {
     this.fmt = { ...this.fmt, ...patch };            // an explicit choice also becomes the default for new text
@@ -1594,10 +1613,14 @@ export class Panel {
     this.editingItem = d;
     if (d.t === "text") {                               // text boxes: rich text (invisible editor over the live canvas text)
       this.ta.hidden = true;
-      const c = RT.contentOf(d); this.editing.content = c;
+      const fresh = idx === null, ts = this.textStyle;
+      let c = RT.contentOf(d);
+      if (fresh && ts.list) c = RT.makeContent(c.text, null, [ts.list]);                     // a new box starts as the list the Text tool is set to
+      this.editing.content = c;
       this.rt.show(); this.rt.setContent(c, this.richCfg(this.editedItem()));
       this.positionEditor(); this.syncLive(); this.render();
       this.rt.focus(); this.rt.setSel(c.text.length, c.text.length);
+      if (fresh && (ts.b || ts.i || ts.u)) this.rt.pending = { ...(ts.b ? { b: true } : {}), ...(ts.i ? { i: true } : {}), ...(ts.u ? { u: true } : {}) };    // what is typed first is bold / italic / underlined
       this.fmtKey = ""; this.rstateKey = "";
       return;
     }
@@ -2064,7 +2087,7 @@ export class Panel {
     }
   }
   viewState() { return { zoom: Math.round(this.view.scale * 1e4) / 1e4, auto_fit: this.view.fit, page: this.shown(), bars: this.barsOpen,
-    toolbar: { tool: this.tool, ...T.groupsToSaved(this.groups), recent: [...this.recent], text_format: { ...this.fmt }, snap_lines: this.snapLines, shape: this.shapeKind, fill: this.fill.shape, fill_mind: this.fill.mind, conn_style: this.connStyle, conn_arrow: this.connArrow, node_kind: this.nodeKind },
+    toolbar: { tool: this.tool, ...T.groupsToSaved(this.groups), recent: [...this.recent], text_format: { ...this.fmt }, snap_lines: this.snapLines, shape: this.shapeKind, fill: this.fill.shape, fill_mind: this.fill.mind, text_style: { ...this.textStyle }, conn_style: this.connStyle, conn_arrow: this.connArrow, node_kind: this.nodeKind },
     ...(this.kind === "board" ? { center: [Math.round((this.cw / 2 - this.view.tx) / this.view.scale), Math.round((this.ch / 2 - this.view.ty) / this.view.scale)] } : {}) }; }
   restoreView(st) {
     if (!st || typeof st !== "object") return;
@@ -2079,6 +2102,7 @@ export class Panel {
       if (typeof tb.shape === "string" && M.SHAPE_KINDS.some((k) => k.id === tb.shape)) this.shapeKind = tb.shape;
       if (typeof tb.fill === "boolean") this.fill.shape = tb.fill;
       if (typeof tb.fill_mind === "boolean") this.fill.mind = tb.fill_mind;
+      if (tb.text_style !== undefined) this.textStyle = T.sanitizeTextStyle(tb.text_style);
       if (M.CONN_STYLES.includes(tb.conn_style)) this.connStyle = tb.conn_style;
       if (typeof tb.conn_arrow === "boolean") this.connArrow = tb.conn_arrow;
       if (M.NODE_KINDS.includes(tb.node_kind)) this.nodeKind = tb.node_kind;

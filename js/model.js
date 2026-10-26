@@ -33,6 +33,7 @@ export const MIN_SIZE = 4.0;
 export const TEXT_DIRS = ["ltr", "rtl"];                    // explicit text direction of a text / note item
 export const TEXT_ALIGNS = ["left", "center", "right"];     // explicit alignment (separate from direction)
 export const TEXT_BOX_W = 300.0;                              // default width of a new text box
+export const TEXT_BOX_MIN_W = 160.0;                          // narrowest default width of a new text box on a notebook page (when tapped close to the edge)
 
 // ------------------------------------------------------------------ shapes
 // Every shape is dragged out as a box (x1,y1)-(x2,y2). line / arrow / rect / ellipse keep their own item types (old files);

@@ -147,6 +147,10 @@ input.hex { grid-column:2 / span 2; text-transform:uppercase; }
   white-space:pre-wrap; overflow-wrap:anywhere; word-break:normal; overflow:visible; color:transparent; -webkit-text-fill-color:transparent; caret-color:var(--accent);
   text-rendering:geometricPrecision; font-kerning:normal; cursor:text; -webkit-user-select:text; user-select:text; -webkit-text-size-adjust:none; }
 .editor.rt[hidden] { display:none; }
+/* The editor's text must measure exactly like the text the canvas draws (which uses explicit fonts), so it may never inherit presentation from its surroundings:
+   e.g. a panel with unsaved changes is styled bold (.dirty), which made the invisible text ~7 % wider than the visible text and pushed the caret ahead of it. */
+.editor.rt { font-weight:400; font-style:normal; font-variant:normal; font-stretch:normal; font-feature-settings:normal; font-variation-settings:normal; font-synthesis:weight style;
+  letter-spacing:normal; word-spacing:normal; text-transform:none; text-indent:0; text-shadow:none; text-decoration:none; font-size-adjust:none; tab-size:8; hyphens:manual; }
 .editor.rt .rp { margin:0; padding:0; min-height:0; }
 .editor.rt span { color:transparent; -webkit-text-fill-color:transparent; }
 .editor.rt [data-b="1"] { font-weight:700; } .editor.rt [data-i="1"] { font-style:italic; } .editor.rt [data-u="1"] { text-decoration:underline; }

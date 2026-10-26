@@ -23,8 +23,9 @@ export function toolDefaults(kind, dark = false) {
     eraser: { color: "#808080", width: 20, size: 18, alpha: 255, bright: 0 },       // eraser: width = its diameter (page units)
   };
 }
-/** Settings of a tool that are not colour / thickness / ... : which shape, connector style, fill on or off. */
+/** Settings of a tool that are not colour / thickness / ... : text formatting, which shape, connector style, fill on or off. */
 export const EXTRAS_DEFAULT = {
+  text: { b: false, i: false, u: false, list: "" },            // formatting a NEW text box starts with (bold, italic, underline, list type "" | "b" | "n")
   shape: { shapeKind: "rect", fill: false },
   mind: { connStyle: "curve", connArrow: true, nodeKind: "round", fill: false },
 };
@@ -46,4 +47,9 @@ export function groupsFromSaved(tb, defaults, sanitize) {
 export function groupsToSaved(groups) {
   return { tools: JSON.parse(JSON.stringify(groups)),
     groups: { draw: { ...groups.pen }, mark: { ...groups.mark }, hltext: { ...groups.hltext }, note: { ...groups.note }, erase: { ...groups.eraser } } };
+}
+/** A saved text-formatting default, cleaned up (anything unknown falls back to the default). */
+export function sanitizeTextStyle(v) {
+  const d = EXTRAS_DEFAULT.text, o = v && typeof v === "object" ? v : {};
+  return { b: o.b === true, i: o.i === true, u: o.u === true, list: o.list === "b" || o.list === "n" ? o.list : d.list };
 }
