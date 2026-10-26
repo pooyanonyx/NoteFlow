@@ -504,6 +504,31 @@ export function paragraphWraps(d) {
   }
   return out;
 }
+// ------------------------------------------------- auto-sized text boxes
+// A text box with g: true has no width of its own choosing: it is as wide as its text, up to the room the surface gives it, and wraps there (on a ruled page onto the
+// next rule). The box grows from a fixed anchor, the edge its text is aligned to (left / right) or its middle (centre), so the text never moves while it is typed.
+/** The anchor x of a text box for an alignment. */
+export function anchorX(d, align) { return align === "right" ? d.x + d.w : align === "center" ? d.x + d.w / 2 : d.x; }
+/** Fit an auto-sized box to its text. g = {a: anchor x, lo, hi: the usable x range of the surface}. While typing (tight false) the box keeps a little room for the caret and for the
+ *  spaces typed at the end of a line; tight is the settled box (no spare room). The lines are those of the room the surface allows, so the box is exactly as wide as its widest line. */
+export function growBox(d, g, tight = false) {
+  const fmt = fmtOf(d), align = fmt ? fmt.align : "left", pad = 2 * TEXT_PAD;
+  const room = Math.max(pad + d.size, align === "right" ? g.a - g.lo : align === "center" ? 2 * Math.min(g.a - g.lo, g.hi - g.a) : g.hi - g.a);
+  const L = layoutRich({ ...d, w: room });
+  let need = 0;
+  L.lines.forEach((ln, i) => {
+    let e = ln.indent + ln.w;
+    if (!tight && (i === L.lines.length - 1 || L.lines[i + 1].para !== ln.para)) {          // typed spaces at the end of a paragraph hang, but the caret walks over them: keep room for it
+      const last = ln.segs[ln.segs.length - 1], shown = last ? last.start + (last.draw ?? last.text).length : ln.start;
+      if (ln.end > shown) e += widthOf(last ? last.font : ln.bigFont, " ".repeat(ln.end - shown));
+    }
+    need = Math.max(need, e);
+  });
+  const wrapped = !tight && L.lines.length > new Set(L.lines.map((l) => l.para)).size;      // while typing, a box whose text has reached the edge and wrapped spans the whole writing area (it does not shrink by a word at every wrap)
+  const inner = wrapped ? room - pad : Math.min(room - pad, Math.max(need + (tight ? 0.02 : Math.max(2, d.size * 0.15)), tight ? 0 : d.size * 1.2));
+  const w = Math.ceil((inner + pad) * 100) / 100, x = align === "right" ? g.a - w : align === "center" ? g.a - w / 2 : g.a;
+  return { ...d, x: Math.round(x * 100) / 100, w };
+}
 /** Draw a text item: every line with its own direction, alignment, list marker and styled pieces. */
 export function drawRichText(ctx, d) {
   const L = layoutRich(d), mw = textInnerWidth(d), bw = mw ? mw : L.width, x0 = d.x + TEXT_PAD, fmt = fmtOf(d), fill = M.cssColor(d);

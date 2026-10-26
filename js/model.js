@@ -235,6 +235,7 @@ function addFmt(d, out) {          // (hoisted: also used by node items)
   }
   if (out.t === "text" && d.w !== undefined) { try { out.w = Math.max(20, Math.min(4000, round2(num(d.w)))); } catch { /* ignore bad optional value */ } }
   if (out.t === "text" && typeof d.ruled === "boolean") out.ruled = d.ruled;
+  if (out.t === "text" && d.g === true && out.w !== undefined && out.dir) out.g = true;       // g: an auto-sized box, its width follows its text (see render.js growBox); a box with a hand-set width has no g
   if (out.t === "text") addRich(d, out);
   return out;
 }
@@ -501,6 +502,7 @@ export function resizeItem(d, handle, px, py, textBox = null, e = 0, keepAspect 
     if (n.runs === undefined) delete n.runs;
     n.x = round2(x0); n.y = round2(y0);
     if (d.w) n.w = round2(Math.max(20, scale != null ? d.w * s : x1 - x0));
+    if (scale == null) delete n.g;                                                              // a width dragged by hand is a fixed width from now on
   }
   return n;
 }

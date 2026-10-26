@@ -30,7 +30,7 @@ with sync_playwright() as pw:
     a = App(pw, width=1400, height=900); kb = a.page.keyboard
     a.ev("() => noteflow.panels.nb.zoomBy(0.5)"); a.page.wait_for_timeout(200)
     a.click_page(100, 150); kb.type("x"); a.finish(); it = a.items()[-1]
-    C.check("new text box on lined paper reaches the right edge of the page (not a fixed 300)", abs(it["x"] + it["w"] - (595 - 12)) < 0.02 and it["w"] > 450, (it["x"], it["w"]))
+    C.check("a new text box starts small, at the tapped point, and is saved as wide as its text (auto-sized)", abs(it["x"] - 100) < 0.02 and it["w"] < 30 and it.get("g") is True, (it["x"], it["w"]))
     sent = "The quick brown fox jumps over the lazy dog and runs"       # ~440 pt at 18 pt: needs more than a 300 pt box
     a.ev("() => { const p = noteflow.panels.nb; p.pages[0].items = []; }")
     a.click_page(100, 220); kb.type(sent)
@@ -38,21 +38,25 @@ with sync_playwright() as pw:
     C.check("a long line is written on ONE ruled line before it wraps", r["lines"] == 1 and r["domLines"] == 1, (r["lines"], r["domLines"], r["cv"]))
     kb.type(" " + sent)
     r = a.ev(MEASURE); C.check("…and wraps when the page edge is really reached", r["lines"] == 2 and ok_lines(r), (r["cv"], r["dom"]))
+    C.check("…the box has grown to the edge of the writing area and not beyond", r["x"] + r["w"] <= 583.01 and r["x"] + r["w"] > 583 - 40 and abs(r["x"] - 100) < 0.02, (r["x"], r["w"]))
     a.finish()
     a.ev("() => { const p = noteflow.panels.nb; p.pages[0].items = []; }")
     a.click_page(500, 220); kb.type("x"); a.finish(); it = a.items()[-1]
-    C.check("tapping near the edge gives a usable box (at least 160 wide, kept on the page)", it["w"] >= 160 and it["x"] + it["w"] <= 583.01, (it["x"], it["w"]))
+    C.check("tapping near the edge: the box starts far enough from it to have room to grow (at least 160), kept on the page", it["x"] <= 583 - 160 + 0.02 and it["x"] + it["w"] <= 583.01, (it["x"], it["w"]))
     a.ev("() => { const p = noteflow.panels.nb; p.pages[0].items = []; p.setPageSettings({ dir: 'rtl' }); }")
     a.click_page(450, 220); kb.type("سلام"); a.finish(); it = a.items()[-1]
-    C.check("right-to-left page: the box grows left from the tap, up to the left edge", it["dir"] == "rtl" and abs(it["x"] - 12) < 0.02 and abs(it["x"] + it["w"] - 450) < 1.5, (it["x"], it["w"]))
+    C.check("right-to-left page: the box is anchored at its right edge (the tap) and grows leftwards", it["dir"] == "rtl" and abs(it["x"] + it["w"] - 450) < 0.02 and it["w"] < 60, (it["x"], it["w"]))
+    a.ev("() => { const p = noteflow.panels.nb; p.pages[0].items = []; }")
+    a.click_page(450, 220); kb.type("سلام " * 60); a.finish(); it = a.items()[-1]
+    C.check("…up to the left edge of the writing area (a box is as wide as its widest line), then the text wraps", it["x"] >= 11.99 and it["w"] > 380 and abs(it["x"] + it["w"] - 450) < 0.02, (it["x"], it["w"]))
     a.ev("() => { const p = noteflow.panels.nb; p.pages[0].items = []; p.setPageSettings({ dir: 'ltr', margin: 'left' }); }")
     a.click_page(30, 300); kb.type("x"); a.finish(); it = a.items()[-1]
-    C.check("a tap inside the red margin puts the box beside it, filling the writing area", abs(it["x"] - 68) < 0.02 and abs(it["x"] + it["w"] - 583) < 0.02, (it["x"], it["w"]))
+    C.check("a tap inside the red margin puts the box beside it (at the edge of the writing area)", abs(it["x"] - 68) < 0.02 and it["w"] < 30, (it["x"], it["w"]))
     a.ev("() => { const p = noteflow.panels.nb; p.pages[0].items = []; p.setNotebook([{paper:'blank', items: []}], 'x'); p.setTool('text'); }")
     a.click_page(100, 300); kb.type("x"); a.finish(); it = a.items()[-1]
-    C.check("blank / other papers too", abs(it["x"] + it["w"] - 583) < 0.02, it)
+    C.check("blank / other papers too", abs(it["x"] - 100) < 0.02 and it["w"] < 30 and it.get("g") is True, it)
     a.ev("() => { const p = noteflow.panels.nb; p.setNotebook([{paper:'lined', items: [{ t: 'text', x: 70, y: 116, w: 300, text: 'old box', color: '#000000', size: 18, ruled: true }]}], 'x'); p.setTool('text'); }")
-    C.check("existing boxes keep their own width", a.ev("() => noteflow.panels.nb.items[0].w") == 300)
+    C.check("existing boxes keep their own width (no g: a width chosen by hand is respected)", a.ev("() => noteflow.panels.nb.items[0].w") == 300 and a.ev("() => noteflow.panels.nb.items[0].g") is None)
 
     # --------------------------------------------------- 2. the caret stays next to the text: editor lines == canvas lines
     bad = []

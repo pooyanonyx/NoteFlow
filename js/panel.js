@@ -283,6 +283,7 @@ export class Panel {
         if (key === "color" && d.fill) n.fill = v;                  // a filled shape stays filled with its colour
         if (key === "size" && d.t === "text" && d.runs) n = F.withContent(n, RT.applyAll(RT.contentOf(d), { z: null }));   // one size for the whole box again
         if (key === "size" && d.t === "text" && d.ruled === true) n = R.ruledNormalize(n);
+        if (key === "size") n = this.fitGrown(n);
         if (JSON.stringify(n) !== JSON.stringify(d)) {
           const items = this.items.slice(); items[this.selected] = n;
           this.commit(items, { keepSel: true, flowIdx: d.t === "text" ? this.selected : null });
@@ -1103,14 +1104,13 @@ export class Panel {
     const t = this.tool, idx = this.hit(p), [w, h] = this.pageDims(), st = this.curStyle;
     if (idx !== null && this.items[idx].t === t) { this.selected = idx; this.startEdit(idx); return; }
     if (t === "text") {
-      const geo = this.kind === "nb" ? this.pageGeo() : null, onLines = !!geo && geo.ruled && this.snapLines;
-      const nb = this.kind === "nb", lo = onLines ? geo.x0 : nb ? 12 : 4, hi = onLines ? geo.x1 : nb ? w - 12 : w - 4;   // on ruled paper new text stays out of the margin / cue column; on a notebook never closer than 12 to the page edge
-      const f = this.fmt;
-      // New text is a box of fixed width, so alignment is visible. On a notebook it reaches the edge of the writing area (the page edge / red margin), so a line can be
-      // filled like on paper before it wraps; elsewhere it is the usual 300. RTL boxes grow leftwards from the tap.
-      const room = f.dir === "rtl" ? p.x - lo : hi - p.x, r2 = (v) => Math.round(v * 100) / 100;
-      const bw = r2(this.kind === "nb" ? Math.min(hi - lo, Math.max(M.TEXT_BOX_MIN_W, room)) : Math.min(M.TEXT_BOX_W, hi - lo));
-      const proto = { t: "text", x: r2(clamp(f.dir === "rtl" ? p.x - bw : p.x, lo, Math.max(lo, hi - bw))), y: clamp(p.y - st.size * 0.7, 0, h - 10), w: bw, dir: f.dir, align: f.align,
+      const geo = this.kind === "nb" ? this.pageGeo() : null;
+      const f = this.fmt, r2 = (v) => Math.round(v * 100) / 100;
+      // New text starts as a tiny auto-sized box (g) at the tapped point and grows with the text, from the edge it is aligned to, up to the edge of the writing area of this
+      // surface (see textBounds), where it wraps. Nothing has to be sized by hand: tap and type.
+      const [blo, bhi] = this.textBounds(), ax = clamp(p.x, blo, bhi);                    // (a tap in the margin / cue column / outside the writing area starts at its edge)
+      const w0 = r2(2 * R.TEXT_PAD + st.size * 1.2), x0 = f.align === "right" ? ax - w0 : f.align === "center" ? ax - w0 / 2 : ax;
+      const proto = { t: "text", x: r2(x0), y: clamp(p.y - st.size * 0.7, 0, h - 10), w: w0, g: true, dir: f.dir, align: f.align,
         text: "", color: st.color, size: st.size, ...this.styleExtra() };
       if (this.linedPage()) {                                  // ruled paper: the first line goes in the tapped row, every line rests on a rule
         proto.ruled = this.snapLines;
@@ -1543,6 +1543,7 @@ export class Panel {
     if (kind === "b" || kind === "i" || kind === "u") { const all = RT.styleOfRange(c, 0, c.text.length, d.size)[kind] === true; c = RT.applyAll(c, { [kind]: !all }); n = F.withContent(d, c); }
     else if (kind === "ul" || kind === "ol") { c = RT.toggleList(c, 0, c.text.length, kind === "ul" ? "b" : "n"); n = F.withContent(d, c); }
     else { const z = step(d.size, kind === "bigger" ? 1 : -1); n = F.withContent({ ...d, size: z }, RT.applyAll(c, { z: null })); if (n.ruled === true) n = R.ruledNormalize(n); }
+    if (n) n = this.fitGrown(n);
     if (n && JSON.stringify(n) !== JSON.stringify(d)) { const items = this.items.slice(); items[this.selected] = n; this.commit(items, { keepSel: true, flowIdx: this.selected }); }
     this.fmtKey = ""; this.rstateItem = null; this.updateFmtUi(); this.render();
   }
@@ -1560,13 +1561,15 @@ export class Panel {
     const ed = this.editing;
     if (ed) {
       const d = ed.idx !== null ? this.items[ed.idx] : ed.proto;
+      const before = ed.grow ? this.editedItem() : null;
       ed.fmt = { ...(ed.fmt || R.effectiveFmt(d)), ...patch };
+      if (before) ed.grow = this.growFor({ ...before, ...ed.fmt });         // the box stays where it is; it now grows from the edge of the new alignment
       this.refreshEditing();
     } else {
       const d = this.textTarget();
       if (d) {
         const f = { ...R.effectiveFmt(d), ...patch };
-        if (f.dir !== d.dir || f.align !== d.align) { const items = this.items.slice(); items[this.selected] = { ...d, ...f }; this.commit(items, { keepSel: true }); }
+        if (f.dir !== d.dir || f.align !== d.align) { const items = this.items.slice(); items[this.selected] = this.fitGrown({ ...d, ...f }); this.commit(items, { keepSel: true }); }
       }
     }
     this.fmtKey = ""; this.updateFmtUi(); this.render();
@@ -1610,9 +1613,35 @@ export class Panel {
     if (!ed) return null;
     const base = ed.idx !== null ? this.items[ed.idx] : ed.proto;
     if (!base || base.t !== "text") return base;
-    const d = this.withEditState(base, ed);
-    return ed.content ? F.withContent(d, ed.content) : d;
+    const key = [base, ed.fmt, ed.ruled, ed.auto, ed.content, ed.grow, this.cur, this.pagePitch()], m = ed.memo;       // (one object per state: its layout is computed once)
+    if (m && m.key.every((v, i) => v === key[i])) return m.d;
+    let d = this.withEditState(base, ed);
+    if (ed.content) d = F.withContent(d, ed.content);
+    if (ed.grow) d = R.growBox(d, ed.grow);
+    ed.memo = { key, d };
+    return d;
   }
+  /** The usable x range [lo, hi] of the surface for a text box (page units). Notebook: the writing area (on ruled paper inside the margin / cue column, else 12 from the page edges);
+   *  PDF page: the page less a small margin; board: what is on screen now (a board is huge, text should wrap where the user is looking), never beyond the board. */
+  textBounds(d = null) {
+    const [w] = this.pageDims();
+    if (this.kind === "nb") { const geo = this.pageGeo(), onLines = geo.ruled && (d ? d.ruled === true : this.snapLines); return onLines ? [geo.x0, geo.x1] : [12, w - 12]; }
+    if (this.kind === "board") {
+      const a = this.screenToPage(0, 0).x, b = this.screenToPage(this.cw, 0).x, lo = Math.max(4, a + 12), hi = Math.min(w - 4, b - 12);
+      return hi - lo >= M.TEXT_BOX_MIN_W ? [lo, hi] : [4, w - 4];
+    }
+    return [4, w - 4];
+  }
+  /** The anchor and limits an auto-sized box grows within: the anchor is kept off the edge so that a box always has at least the narrowest default width to grow into. */
+  growFor(d) {
+    const [lo0, hi0] = this.textBounds(d), f = R.fmtOf(d), align = f ? f.align : "left", MIN = M.TEXT_BOX_MIN_W;
+    const lo = Math.min(lo0, d.x), hi = Math.max(hi0, d.x + d.w);
+    let a = R.anchorX(d, align);
+    a = align === "right" ? Math.max(a, Math.min(lo + MIN, hi)) : align === "center" ? clamp(a, Math.min(lo + MIN / 2, hi), Math.max(hi - MIN / 2, lo)) : Math.min(a, Math.max(hi - MIN, lo));
+    return { a, lo, hi };
+  }
+  /** A settled auto-sized box whose text, size or format was changed outside the editor: as wide as its (new) text again. */
+  fitGrown(d) { return d && d.t === "text" && d.g && R.fmtOf(d) ? R.growBox(d, this.growFor(d), true) : d; }
   withEditState(base, ed) {
     let d = ed.fmt ? { ...base, ...ed.fmt } : base;
     const want = ed.ruled !== undefined ? ed.ruled : (base.ruled === undefined && ed.auto ? true : base.ruled);
@@ -1635,6 +1664,7 @@ export class Panel {
     this.editing = { idx, proto, fmt: null, extra, rich: d.t === "text", page0: this.cur, base: null };
     if (idx !== null && d.t === "text" && d.ruled === undefined && this.snapLines && this.linedPage()) this.editing.auto = true;   // old text: put it on the lines
     this.editingItem = d;
+    if (d.t === "text" && d.g) this.editing.grow = this.growFor(d);              // an auto-sized box: its anchor and the room the surface gives it, fixed for this edit
     if (d.t === "text") {                               // text boxes: rich text (invisible editor over the live canvas text)
       this.ta.hidden = true;
       const fresh = idx === null, ts = this.textStyle;
@@ -1816,7 +1846,8 @@ export class Panel {
   /** Leave the rich text editor: the box is stored (cut into pieces across pages when it is long) as ONE undo step. */
   finishRich(ed) {
     ed.content = this.rt.getContent();
-    const d = this.editedItem(), pi = this.cur, old = ed.idx !== null ? this.items[ed.idx] : null, empty = !ed.content.text.trim();
+    let d = this.editedItem(); const pi = this.cur, old = ed.idx !== null ? this.items[ed.idx] : null, empty = !ed.content.text.trim();
+    if (d && ed.grow) d = R.growBox(d, ed.grow, true);                                        // the box is saved exactly as wide as its text
     this.editing = null; this.editingItem = null; this.rt.hide(); this.caretStop();
     this.live = null; this.preview = null;
     const g = GROUP_OF_TOOL[this.tool]; if (g && this.tool !== "select") this.curStyle = { ...this.groups[g] };      // (the caret's size / colour was only shown, not chosen)
