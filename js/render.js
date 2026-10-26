@@ -407,14 +407,27 @@ function lineFrame(d, L, ln) {
 const pieceX = (pc, k) => { const n = pc.end - pc.start; if (k <= 0) return pc.level & 1 ? pc.w : 0; if (k >= n) return pc.level & 1 ? 0 : pc.w; const w = widthOf(pc.font, pc.text.slice(0, k)); return pc.level & 1 ? pc.w - w : w; };
 /** Index of the line that holds caret offset `off` (at a line break the caret belongs to the line that starts there). */
 function lineAt(L, off) { let k = 0; for (let i = 0; i < L.lines.length; i++) { if (L.lines[i].start <= off) k = i; else break; } return k; }
+// The spaces at the end of a line are not part of its drawn pieces (they hang: nothing is drawn, the line is not wider for them), but the caret still has to
+// walk over them while they are typed: it moves by their width, in the reading direction of the line, and stops at the edge of the text area.
 function caretInLine(d, L, li, off) {
-  const ln = L.lines[li], f = lineFrame(d, L, ln), pcs = f.pcs;
-  if (!pcs.length) return { x: f.align === "right" ? f.cr : f.align === "center" ? f.cl + f.cw / 2 : f.cl, size: ln.maxSize, font: ln.bigFont, f };
-  const o = Math.max(ln.start, Math.min(ln.end, off)), c = o > ln.start ? o - 1 : o;      // the caret stands behind the character before it (in front of the first one at the start of a line)
+  const ln = L.lines[li], f = lineFrame(d, L, ln), pcs = f.pcs, o = Math.max(ln.start, Math.min(ln.end, off));
+  const hang = (x, from, font, dirRtl) => {                                                  // x of the caret after `from`, moved over the hanging spaces up to `o`
+    const n = o - from; if (n <= 0) return x;
+    const w = widthOf(font, " ".repeat(n));
+    return dirRtl ? Math.max(f.cl, x - w) : Math.min(f.cr, x + w);
+  };
+  if (!pcs.length) {                                                                          // an empty line, or one that holds only spaces
+    const x = f.align === "right" ? f.cr : f.align === "center" ? f.cl + f.cw / 2 : f.cl;
+    return { x: hang(x, ln.start, ln.bigFont, ln.rtl), size: ln.maxSize, font: ln.bigFont, f };
+  }
+  const shown = pcs.reduce((a, p) => Math.max(a, p.end), 0);                                  // end of the drawn text of the line
+  const c = o > ln.start ? o - 1 : o;                                                         // the caret stands behind the character before it (in front of the first one at the start of a line)
   let pc = pcs.find((p) => c >= p.start && c < p.end), k;
   if (pc) k = (o > ln.start ? c + 1 : c) - pc.start;
-  else { pc = pcs.reduce((a, b) => (b.start > a.start ? b : a)); k = pc.end - pc.start; }   // behind the last letter (the spaces that hang at the end of a line are not drawn)
-  return { x: f.left + pc.x + pieceX(pc, k), size: pc.size, font: pc.font, f };
+  else { pc = pcs.reduce((a, b) => (b.start > a.start ? b : a)); k = pc.end - pc.start; }   // behind the last letter
+  let x = f.left + pc.x + pieceX(pc, k);
+  if (o > shown) x = hang(f.left + pc.x + pieceX(pc, pc.end - pc.start), shown, pc.font, !!(pc.level & 1));
+  return { x, size: pc.size, font: pc.font, f };
 }
 /** The caret of a text item at character offset `off`: {x, top, bottom, line} in page units (top / bottom span the font's ascent and descent on the line's baseline). */
 export function caretAt(d, off) {
@@ -434,6 +447,8 @@ export function selectionRects(d, a, b) {
       const x1 = f.left + pc.x + pieceX(pc, ps - pc.start), x2 = f.left + pc.x + pieceX(pc, pe - pc.start);
       rects.push([Math.min(x1, x2), Math.max(x1, x2)]);
     }
+    const shown = f.pcs.reduce((m, p) => Math.max(m, p.end), ln.start), hs = Math.max(s, shown);
+    if (hs < e) { const p1 = caretInLine(d, L, li, hs).x, p2 = caretInLine(d, L, li, e).x; rects.push([Math.min(p1, p2), Math.max(p1, p2)]); }   // (selected spaces at the end of the line)
     if (lastOfPara && b > ln.end && text[ln.end] === "\n" && a <= ln.end) {          // the paragraph break is selected too: a short tab at the end of the line (where the next letter would go)
       const r = caretInLine(d, L, li, ln.end), w = Math.max(2, r.size * 0.3);
       rects.push(ln.rtl ? [r.x - w, r.x] : [r.x, r.x + w]);

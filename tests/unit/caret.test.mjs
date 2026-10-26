@@ -54,7 +54,7 @@ test("mixed directions: Persian inside English, positions follow the visual orde
 test("selection rectangles: one per line, the whole width of the selected letters", () => {
   const d = text({ w: 88, size: 10, text: "aaa bbb ccc ddd eee" });
   const r = R.selectionRects(d, 2, 18);
-  assert.equal(r.length, 2); near(r[0].x0, X0(d) + 10); near(r[0].x1, X0(d) + 75); near(r[1].x0, X0(d)); near(r[1].x1, X0(d) + 10);
+  assert.equal(r.length, 2); near(r[0].x0, X0(d) + 10); near(r[0].x1, X0(d) + 80); near(r[1].x0, X0(d)); near(r[1].x1, X0(d) + 10);
   assert.ok(r[1].top > r[0].top);
   assert.deepEqual(R.selectionRects(d, 5, 5), []);
 });
@@ -86,4 +86,18 @@ test("Up / Down keep the horizontal position, Home / End stay on the line", () =
   assert.deepEqual(R.lineRange(d, 5), { start: 0, end: 8 }); assert.deepEqual(R.lineRange(d, 11), { start: 9, end: 12 });
   const w = text({ w: 88, size: 10, text: "aaa bbb ccc ddd eee" });
   assert.deepEqual(R.lineRange(w, 3), { start: 0, end: 15 });     // a wrapped line ends in front of its hanging space
+});
+
+test("typed spaces move the caret: at the end of the text, on a line of only spaces, in right-to-left text, and stop at the edge", () => {
+  const d = text({ size: 10, w: 200, text: "ab" + " ".repeat(10) });                  // a space is 5 pt wide
+  for (let k = 2; k <= 12; k++) near(R.caretAt(d, k).x, X0(d) + k * 5, "offset " + k);
+  const sp = text({ size: 10, w: 200, text: "ab\n" + " ".repeat(4) });
+  near(R.caretAt(sp, 3).x, X0(sp)); near(R.caretAt(sp, 7).x, X0(sp) + 20);
+  const rtl = text({ size: 10, w: 200, dir: "rtl", align: "right", text: AR + "   " }), right = X0(rtl) + 192;
+  near(R.caretAt(rtl, 4).x, right - 20); near(R.caretAt(rtl, 7).x, right - 35);
+  const far = text({ size: 10, w: 60, text: "ab" + " ".repeat(40) });
+  assert.ok(R.caretAt(far, 42).x <= X0(far) + 52 + 1e-6, "the caret stays inside the text area");
+  const mid = text({ size: 10, w: 88, text: "aaa bbb ccc ddd   eee" });               // spaces that hang at a line break
+  assert.ok(R.caretAt(mid, 17).x > R.caretAt(mid, 15).x && R.caretAt(mid, 17).line === 0);
+  const r = R.selectionRects(d, 2, 7); assert.equal(r.length, 1); near(r[0].x0, X0(d) + 10); near(r[0].x1, X0(d) + 35);
 });

@@ -104,4 +104,17 @@ with sync_playwright() as pw:
     k.press("Home"); h = sel(); k.press("End"); e = sel()
     C.check("Home / End: start / end of the line", h == 21 + 1 + 0 or h == 22, (h, e))
     a.finish()
+
+    # ---------------------------------------------------------- 6. typed spaces move the caret at once (they hang, so they are not part of the drawn text)
+    bad = []
+    for name, word, dir_, align in (("EN", "abc", "ltr", "left"), ("FA", "سلام", "rtl", "right")):
+        start(a, 12, 1.0, dir_, align); k.type(word); xs = []
+        for _ in range(10):
+            k.press("Space"); a.page.wait_for_timeout(30); xs.append(a.ev("() => { const p = noteflow.panels.nb; return window.__R.caretAt(p.editedItem(), p.rt.getSel()[0]).x; }"))
+        step = [(xs[i + 1] - xs[i]) * (1 if dir_ == "ltr" else -1) for i in range(9)]
+        if not all(x > 1 for x in step) or max(step) - min(step) > 0.05: bad.append((name, xs))
+        k.type("c"); a.page.wait_for_timeout(30); after = a.ev("() => { const p = noteflow.panels.nb; return window.__R.caretAt(p.editedItem(), p.rt.getSel()[0]).x; }")
+        if dir_ == "ltr" and not (0 < after - xs[-1] < 12 * 0.8): bad.append((name, "jump after the next letter", xs[-1], after))   # (one letter, not the width of all the spaces again)
+        a.ev("() => noteflow.panels.nb.finishEdit()")
+    C.check("typing Space (1 or 10 times, English and Persian): the caret moves one space width at a time, and does not jump when the next letter comes", not bad, bad[:2])
 sys.exit(0 if C.summary() else 1)
