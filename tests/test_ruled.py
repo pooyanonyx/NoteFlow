@@ -62,6 +62,7 @@ with sync_playwright() as pw:
         it = new_text(a, 80, tapy, ["HH"], size=18); rows.append(it["y"] + PAD)
     C.check("taps in one row all give the same row", len(set(rows)) == 1 and rows[0] == 96, rows)
     a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; }")
+    a.ev("() => noteflow.panels.nb.scrollViewBy(0, -5000)"); a.page.wait_for_timeout(100)      # (typing the big letters above scrolled the view to keep the caret on screen: back to the top of the page)
     it = new_text(a, 80, 60, ["HH"], size=18)           # in the strip above the first rule: first line stands on the first printed rule
     C.check("tap above the first rule -> first printed rule", abs(it["y"] + PAD + lh_of(18) - TOP) < 1e-6, it["y"])
     a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; }")

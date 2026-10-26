@@ -63,7 +63,8 @@ select.paper { min-height:28px; font:inherit; font-size:12px; border:1px solid v
 @media (pointer:coarse) { input.pageno, select.paper { min-height:34px; } }
 
 /* stage */
-.stage { position:absolute; inset:0; overflow:hidden; touch-action:none; background:#c9ccd1; outline:none; }
+.stage { position:absolute; inset:0; overflow:hidden; overflow:clip; touch-action:none;   /* (clip: the browser may not scroll it to reveal the native caret of the editor - that shifted the canvas away from where the app thinks it is) */
+   background:#c9ccd1; outline:none; }
 .stage canvas.view { position:absolute; inset:0; display:block; touch-action:none; }
 .stage[data-tool="pen"], .stage[data-tool="mark"], .stage[data-tool="line"], .stage[data-tool="arrow"], .stage[data-tool="rect"],
 .stage[data-tool="ellipse"], .stage[data-tool="hltext"] { cursor:crosshair; }
@@ -144,7 +145,7 @@ input.hex { grid-column:2 / span 2; text-transform:uppercase; }
 
 /* ---- rich text editor: the text is drawn on the page canvas, this element only provides caret, selection and input (its own text is invisible) */
 .editor.rt { position:absolute; z-index:5; margin:0; padding:0; box-sizing:content-box; border:1.5px dashed var(--accent); border-radius:2px; outline:none; background:transparent;
-  white-space:pre-wrap; overflow-wrap:anywhere; word-break:normal; overflow:visible; color:transparent; -webkit-text-fill-color:transparent; caret-color:var(--accent);
+  white-space:pre-wrap; overflow-wrap:anywhere; word-break:normal; overflow:visible; color:transparent; -webkit-text-fill-color:transparent; caret-color:transparent;
   text-rendering:geometricPrecision; font-kerning:normal; cursor:text; -webkit-user-select:text; user-select:text; -webkit-text-size-adjust:none; }
 .editor.rt[hidden] { display:none; }
 /* The editor's text must measure exactly like the text the canvas draws (which uses explicit fonts), so it may never inherit presentation from its surroundings:
@@ -154,7 +155,7 @@ input.hex { grid-column:2 / span 2; text-transform:uppercase; }
 .editor.rt .rp { margin:0; padding:0; min-height:0; }
 .editor.rt span { color:transparent; -webkit-text-fill-color:transparent; }
 .editor.rt [data-b="1"] { font-weight:700; } .editor.rt [data-i="1"] { font-style:italic; } .editor.rt [data-u="1"] { text-decoration:underline; }
-.editor.rt ::selection, .editor.rt::selection { background:rgba(25,118,210,.32); color:transparent; -webkit-text-fill-color:transparent; }
+.editor.rt ::selection, .editor.rt::selection { background:transparent; color:transparent; -webkit-text-fill-color:transparent; }     /* (caret and selection are drawn on the canvas from the same layout as the text: panel.js drawRichCaret) */
 
 /* ---- rich text buttons, size label, paper settings, reset buttons */
 .richgrp { display:inline-flex; align-items:center; gap:2px; } .richgrp[hidden] { display:none; }

@@ -335,13 +335,13 @@ function buildLayout(d, maxWidth) {
         ({ cur, w } = breakOverlong(u, avail, cur, w, rows));
         continue;
       }
-      if (cur.length && w + u.wordW > avail + 1e-6) { rows.push(cur); cur = []; w = 0; }
+      if (cur.length && w + u.wordW > avail + 1e-6) { cur.need = w + u.wordW; rows.push(cur); cur = []; w = 0; }      // (`need`: how wide this line would have to be for the next word to fit on it)
       cur.push(...u.frags); if (u.space) cur.push(u.space); w += u.wordW + u.spaceW;
     }
     rows.push(cur);
     rows.forEach((frs, ri) => {
       const ln = makeLine(frs, p, ctxp);
-      ln.num = list === "n" ? num : 0; ln.first = ri === 0;
+      ln.num = list === "n" ? num : 0; ln.first = ri === 0; ln.need = frs.need ?? Infinity;
       if (ri === 0 && markerText) { const first = ln.segs[0]; ln.marker = { text: markerText, size: first ? first.size : size, font: fontOf(first ? first.size : size, {}) }; }
       ln.h = ruled ? pitch * Math.max(1, Math.ceil(ln.maxSize * RULED_LEADING / pitch - 1e-9)) : ln.maxSize * LINE_FACTOR;
       if (ruled) ln.base = ln.h - RULED_LIFT; else { const m = fontMetrics(ln.bigFont); ln.base = (ln.h - (m.asc + m.desc)) / 2 + m.asc; }
@@ -359,7 +359,7 @@ function visualize(ln) {
     const t = s.draw ?? s.text;
     for (const r of BD.levelRuns(levels.subarray(pos, pos + t.length))) {
       const text = t.slice(r.start, r.end);
-      pcs.push({ text, level: r.level, seg: s, w: r.start === 0 && r.end === t.length ? s.w : widthOf(s.font, text) });
+      pcs.push({ text, level: r.level, seg: s, start: s.start + r.start, end: s.start + r.end, w: r.start === 0 && r.end === t.length ? s.w : widthOf(s.font, text) });
     }
     pos += t.length;
   }
@@ -373,6 +373,121 @@ export function layoutRich(d, maxWidth = textInnerWidth(d)) {
     const L = buildLayout(d, maxWidth); layoutCache.set(d, L); return L;
   }
   return buildLayout(d, maxWidth);
+}
+// ------------------------------------------------- caret, selection and hit testing
+// The caret and the selection of a text box that is being edited are computed from the layout above: the very data (fonts, widths, line breaks,
+// bidi order, alignment) that draws the text. They therefore cannot disagree with the visible text. (The browser's own caret comes from a second,
+// independent text engine working on an invisible copy of the text; it is rounded to device pixels, lags a frame behind the canvas and drifts
+// away from the canvas text with every difference in glyph advances, so it is hidden and never trusted for the position.)
+const _pieces = new WeakMap();
+/** The pieces of one line in visual (left to right) order: [{start, end, text, font, size, level, w, x}] (x counted from the left end of the pieces). */
+function linePieces(ln) {
+  let out = _pieces.get(ln); if (out) return out;
+  out = [];
+  if (ln.vis) { let x = 0; for (const pc of ln.vis) { out.push({ start: pc.start, end: pc.end, text: pc.text, font: pc.seg.font, size: pc.seg.size, level: pc.level, w: pc.w, x }); x += pc.w; } }
+  else if (ln.segs.length) {
+    const s = ln.segs[0], t = s.draw ?? s.text, pcs = [];
+    for (const r of BD.levelRuns(BD.resolveLevels(t, ln.rtl))) {
+      const text = t.slice(r.start, r.end);
+      pcs.push({ start: s.start + r.start, end: s.start + r.end, text, font: s.font, size: s.size, level: r.level, w: r.start === 0 && r.end === t.length ? s.w : widthOf(s.font, text) });
+    }
+    let x = 0; for (const pc of BD.visualOrder(pcs)) { pc.x = x; x += pc.w; out.push(pc); }
+  }
+  _pieces.set(ln, out); return out;
+}
+/** Where the pieces of a line start (left end, page units) and how wide they are: the same rules drawRichText draws with. */
+function lineFrame(d, L, ln) {
+  const mw = textInnerWidth(d), bw = mw ? mw : L.width, x0 = d.x + TEXT_PAD, fmt = fmtOf(d), rtl = ln.rtl;
+  const cl = x0 + (rtl ? 0 : ln.indent), cr = x0 + bw - (rtl ? ln.indent : 0), cw = cr - cl, align = fmt ? fmt.align : (rtl ? "right" : "left");
+  const pcs = linePieces(ln), W = pcs.length ? pcs[pcs.length - 1].x + pcs[pcs.length - 1].w : 0;
+  const left = align === "right" ? cr - W : align === "center" ? cl + (cw - W) / 2 : cl;
+  return { pcs, W, left, cl, cr, cw, align, top: d.y + TEXT_PAD + ln.y, rtl };
+}
+// distance from the left end of a piece to the place between its k-th and (k+1)-th character (the prefix is measured as shaped text)
+const pieceX = (pc, k) => { const n = pc.end - pc.start; if (k <= 0) return pc.level & 1 ? pc.w : 0; if (k >= n) return pc.level & 1 ? 0 : pc.w; const w = widthOf(pc.font, pc.text.slice(0, k)); return pc.level & 1 ? pc.w - w : w; };
+/** Index of the line that holds caret offset `off` (at a line break the caret belongs to the line that starts there). */
+function lineAt(L, off) { let k = 0; for (let i = 0; i < L.lines.length; i++) { if (L.lines[i].start <= off) k = i; else break; } return k; }
+function caretInLine(d, L, li, off) {
+  const ln = L.lines[li], f = lineFrame(d, L, ln), pcs = f.pcs;
+  if (!pcs.length) return { x: f.align === "right" ? f.cr : f.align === "center" ? f.cl + f.cw / 2 : f.cl, size: ln.maxSize, font: ln.bigFont, f };
+  const o = Math.max(ln.start, Math.min(ln.end, off)), c = o > ln.start ? o - 1 : o;      // the caret stands behind the character before it (in front of the first one at the start of a line)
+  let pc = pcs.find((p) => c >= p.start && c < p.end), k;
+  if (pc) k = (o > ln.start ? c + 1 : c) - pc.start;
+  else { pc = pcs.reduce((a, b) => (b.start > a.start ? b : a)); k = pc.end - pc.start; }   // behind the last letter (the spaces that hang at the end of a line are not drawn)
+  return { x: f.left + pc.x + pieceX(pc, k), size: pc.size, font: pc.font, f };
+}
+/** The caret of a text item at character offset `off`: {x, top, bottom, line} in page units (top / bottom span the font's ascent and descent on the line's baseline). */
+export function caretAt(d, off) {
+  const L = layoutRich(d), li = lineAt(L, off), ln = L.lines[li], r = caretInLine(d, L, li, off), m = fontMetrics(r.font);
+  const base = r.f.top + ln.base, top = Math.max(r.f.top, base - m.asc), bottom = Math.min(r.f.top + ln.h, base + m.desc);
+  return { x: r.x, top, bottom: Math.max(bottom, top + 1), line: li, size: r.size };
+}
+/** The highlighted areas of the selection [a, b) of a text item: [{x0, x1, top, bottom}] in page units (one or more per line). */
+export function selectionRects(d, a, b) {
+  const L = layoutRich(d), out = [], text = String(d.text ?? "");
+  if (a > b) [a, b] = [b, a];
+  L.lines.forEach((ln, li) => {
+    const s = Math.max(a, ln.start), e = Math.min(b, ln.end), f = lineFrame(d, L, ln), bottom = f.top + ln.h, rects = [];
+    const lastOfPara = li === L.lines.length - 1 || L.lines[li + 1].para !== ln.para;
+    if (s < e) for (const pc of f.pcs) {
+      const ps = Math.max(s, pc.start), pe = Math.min(e, pc.end); if (ps >= pe) continue;
+      const x1 = f.left + pc.x + pieceX(pc, ps - pc.start), x2 = f.left + pc.x + pieceX(pc, pe - pc.start);
+      rects.push([Math.min(x1, x2), Math.max(x1, x2)]);
+    }
+    if (lastOfPara && b > ln.end && text[ln.end] === "\n" && a <= ln.end) {          // the paragraph break is selected too: a short tab at the end of the line (where the next letter would go)
+      const r = caretInLine(d, L, li, ln.end), w = Math.max(2, r.size * 0.3);
+      rects.push(ln.rtl ? [r.x - w, r.x] : [r.x, r.x + w]);
+    }
+    rects.sort((p, q) => p[0] - q[0]);
+    const merged = [];
+    for (const r of rects) { const l = merged[merged.length - 1]; if (l && r[0] <= l[1] + 0.01) l[1] = Math.max(l[1], r[1]); else merged.push(r.slice()); }
+    for (const r of merged) out.push({ x0: r[0], x1: r[1], top: f.top, bottom });
+  });
+  return out;
+}
+/** Character offset nearest to the page point (px, py) of a text item (what a click there means), and the offset range of the line it fell on. */
+export function offsetAtPoint(d, px, py) {
+  const L = layoutRich(d); if (!L.lines.length) return 0;
+  const yy = py - (d.y + TEXT_PAD); let li = L.lines.length - 1;
+  for (let i = 0; i < L.lines.length; i++) if (yy < L.lines[i].y + L.lines[i].h) { li = i; break; }
+  return offsetInLine(d, L, li, px);
+}
+function offsetInLine(d, L, li, px) {
+  const ln = L.lines[li], f = lineFrame(d, L, ln), pcs = f.pcs;
+  if (!pcs.length) return ln.start;
+  let best = null;
+  for (const pc of pcs) {                                                        // the piece under px (or the nearest one)
+    const x1 = f.left + pc.x, x2 = x1 + pc.w, dist = px < x1 ? x1 - px : px > x2 ? px - x2 : 0;
+    if (!best || dist < best.dist) best = { pc, dist };
+  }
+  const pc = best.pc, n = pc.end - pc.start, rel = px - (f.left + pc.x), ends = [0];
+  for (const g of graphemes(pc.text)) ends.push(ends[ends.length - 1] + g.length);
+  let bestK = 0, bestD = Infinity;
+  for (const k of ends) { const dd = Math.abs(pieceX(pc, k) - rel); if (dd < bestD - 1e-9) { bestD = dd; bestK = k; } }
+  return Math.min(ln.end, pc.start + Math.min(n, bestK));
+}
+/** Offset one line up (dir = -1) / down (+1) from `off`, keeping the horizontal position `x` (page units) the caret had; null when there is no such line. */
+export function offsetVertical(d, off, dir, x) {
+  const L = layoutRich(d), li = lineAt(L, off) + dir;
+  if (li < 0 || li >= L.lines.length) return null;
+  return offsetInLine(d, L, li, x);
+}
+/** Start / end offset of the line that holds `off` (Home / End). End is where the next letter would be typed: the end of the visible text of a wrapped line (its hanging spaces stay behind the break), the very end of the last line of a paragraph. */
+export function lineRange(d, off) {
+  const L = layoutRich(d), li = lineAt(L, off), ln = L.lines[li], lastOfPara = li === L.lines.length - 1 || L.lines[li + 1].para !== ln.para;
+  const last = ln.segs[ln.segs.length - 1], shown = last ? last.start + (last.draw ?? last.text).length : ln.start;
+  return { start: ln.start, end: lastOfPara ? ln.end : shown };
+}
+
+/** Per paragraph: {rtl, indent, lo, hi}. A text area of any width in [lo, hi) breaks the paragraph into exactly the lines the canvas shows (lo: its widest line,
+ *  hi: the narrowest width at which some word would have moved up to the line before). The invisible editor is given the middle of that range. */
+export function paragraphWraps(d) {
+  const out = [];
+  for (const ln of layoutRich(d).lines) {
+    const o = out[ln.para] || (out[ln.para] = { rtl: ln.rtl, indent: ln.indent, lo: 0, hi: Infinity });
+    o.lo = Math.max(o.lo, ln.w); o.hi = Math.min(o.hi, ln.need ?? Infinity);
+  }
+  return out;
 }
 /** Draw a text item: every line with its own direction, alignment, list marker and styled pieces. */
 export function drawRichText(ctx, d) {

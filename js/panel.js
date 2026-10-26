@@ -58,6 +58,7 @@ export class Panel {
     this.rasters = new Map(); this.rasterJob = null; this.rasterTimer = 0; this.badPages = new Set();
     this.sizeJobs = new Map(); this.offs = null; this.docW = 595; this.docH = 842; this.vp = 0; this.vpLock = null; this.fling = 0;
     this.fmt = { dir: "ltr", align: "left" }; this.fmtKey = "";      // text direction / alignment used for new text
+    this.caretOn = true; this.caretTimer = 0; this.caretColor = null;   // the caret of the rich text editor is drawn on the canvas (see drawRichCaret); it blinks on this timer
     this.snapLines = true;                                          // text written on lined paper follows the printed rules (see render.js "writing on ruled paper")
     this.shapeKind = "rect"; this.fill = { shape: false, mind: false }; this.textStyle = { ...T.EXTRAS_DEFAULT.text }; this.fillKey = "";  // Shapes tool: active shape + Fill switch (Shapes and Mind map keep their own)
     this._bc = new WeakMap(); this.eraserPos = null;
@@ -224,6 +225,7 @@ export class Panel {
     this.rt = new RichEditor({ onInput: () => this.onRichInput(), onSelection: () => this.onRichSel(), onKey: (e) => this.onRichKey(e), onBlur: () => this.finishEdit() });
     this.msg = el("div", { class: "msg" });
     this.stage = el("div", { class: "stage", tabIndex: -1 }, this.canvas, this.ta, this.rt.el, this.msg);
+    this.stage.addEventListener("scroll", () => { if (this.stage.scrollLeft || this.stage.scrollTop) { this.stage.scrollLeft = 0; this.stage.scrollTop = 0; } });   // (the view is moved by the app only, never by the browser)
     this.body = el("div", { class: "pbody" }, this.stage, this.bars);    // bars overlay the stage (position:absolute), they take no layout space
     this.root = el("section", { class: "panel", dataset: { key: this.key, kind: this.kind } }, head, this.body, this.fileInput, this.imgInput);
 
@@ -675,6 +677,7 @@ export class Panel {
         if (isCur && this.linkTarget && o.nodes) { const n = o.nodes.get(this.linkTarget); if (n) { ctx.strokeStyle = "#1976d2"; ctx.lineWidth = 3; ctx.setLineDash([6, 4]); ctx.strokeRect(Math.min(n.x1, n.x2) - 5, Math.min(n.y1, n.y2) - 5, Math.abs(n.x2 - n.x1) + 10, Math.abs(n.y2 - n.y1) + 10); } }
         ctx.restore();
       }
+      if (isCur && this.editing && this.editing.rich) this.drawRichCaret(ctx);
       if (isCur && this.selected !== null && list[this.selected]) this.drawSelection(ctx, list[this.selected]);
       ctx.restore();
     }
@@ -682,6 +685,27 @@ export class Panel {
     const list = this.drawList;
     if (this.selected !== null && list[this.selected] && !this.editing) this.drawHandles(ctx, list[this.selected]);
   }
+  /** The caret and the selection of the text box that is being edited, drawn in the same frame as its text and from the same layout (render.js caretAt / selectionRects).
+   *  The editor element only supplies the character offsets: where they are on the page is never read back from the browser's own text engine. */
+  drawRichCaret(ctx) {
+    const d = this.editedItem(); if (!d || d.t !== "text") return;
+    const [a, b] = this.rt.getSel(), s = this.view.scale;
+    ctx.save();
+    if (a !== b) { ctx.fillStyle = "rgba(25,118,210,.32)"; for (const r of R.selectionRects(d, a, b)) ctx.fillRect(r.x0, r.top, r.x1 - r.x0, r.bottom - r.top); }
+    else if (this.caretOn) {
+      const c = R.caretAt(d, a), w = Math.max(1.4 / s, c.size * 0.06);                    // (at least 1.4 screen px thick, thicker with big letters)
+      if (!this.caretColor) this.caretColor = getComputedStyle(this.stage).getPropertyValue("--accent").trim() || "#1976d2";
+      ctx.fillStyle = this.caretColor; ctx.fillRect(c.x - w / 2, c.top, w, c.bottom - c.top);
+    }
+    ctx.restore();
+  }
+  /** The caret shows (solid) now and starts blinking again; called whenever the text or the selection changed. */
+  caretReset() {
+    clearInterval(this.caretTimer); this.caretTimer = 0; this.caretOn = true;
+    if (!this.editing || !this.editing.rich) return;
+    if (!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) this.caretTimer = setInterval(() => { this.caretOn = !this.caretOn; this.render(); }, 530);
+  }
+  caretStop() { clearInterval(this.caretTimer); this.caretTimer = 0; this.caretOn = true; }
   /** The light backing of a free text box while it is edited (on ruled paper the lines show through). */
   drawEditBg(ctx, d) {
     if (d.t !== "text" || d.ruled === true || (this.kind === "board" && R.boardTheme(this.pages[this.cur].paper))) return;     // (not on a blackboard: light text on a white patch would vanish)
@@ -1520,7 +1544,7 @@ export class Panel {
     else if (kind === "ul" || kind === "ol") { c = RT.toggleList(c, 0, c.text.length, kind === "ul" ? "b" : "n"); n = F.withContent(d, c); }
     else { const z = step(d.size, kind === "bigger" ? 1 : -1); n = F.withContent({ ...d, size: z }, RT.applyAll(c, { z: null })); if (n.ruled === true) n = R.ruledNormalize(n); }
     if (n && JSON.stringify(n) !== JSON.stringify(d)) { const items = this.items.slice(); items[this.selected] = n; this.commit(items, { keepSel: true, flowIdx: this.selected }); }
-    this.fmtKey = ""; this.rstateItem = null; this.render();
+    this.fmtKey = ""; this.rstateItem = null; this.updateFmtUi(); this.render();
   }
   /** Bold / italic / underline / list / size chosen on the Text tool while no text box is open (they are kept with the tool, saved, and reset by its Reset to default). */
   setTextDefault(kind, size) {
@@ -1529,7 +1553,7 @@ export class Panel {
     else if (kind === "ul") ts.list = ts.list === "b" ? "" : "b";
     else if (kind === "ol") ts.list = ts.list === "n" ? "" : "n";
     else if (size !== null && size !== this.curStyle.size) this.applyStyle("size", size, true);
-    this.fmtKey = ""; this.render();
+    this.fmtKey = ""; this.updateFmtUi(); this.render();
   }
   setFmt(patch) {
     this.fmt = { ...this.fmt, ...patch };            // an explicit choice also becomes the default for new text
@@ -1619,7 +1643,7 @@ export class Panel {
       this.editing.content = c;
       this.rt.show(); this.rt.setContent(c, this.richCfg(this.editedItem()));
       this.positionEditor(); this.syncLive(); this.render();
-      this.rt.focus(); this.rt.setSel(c.text.length, c.text.length);
+      this.rt.focus(); this.rt.setSel(c.text.length, c.text.length); this.caretReset();
       if (fresh && (ts.b || ts.i || ts.u)) this.rt.pending = { ...(ts.b ? { b: true } : {}), ...(ts.i ? { i: true } : {}), ...(ts.u ? { u: true } : {}) };    // what is typed first is bold / italic / underlined
       this.fmtKey = ""; this.rstateKey = "";
       return;
@@ -1633,7 +1657,17 @@ export class Panel {
     this.ta.setSelectionRange(this.ta.value.length, this.ta.value.length);
   }
   // ---- rich text editing: the page canvas draws the live text, the editor element is only the (invisible) input layer on top of it
-  richCfg(d) { return { base: d.size, s: this.view.scale, ruled: d.ruled === true, pitch: d.rp || M.RULE_PITCH, fmt: (this.editing && this.editing.fmt) || R.fmtOf(d), indent: R.listIndent(d.size) }; }
+  richCfg(d) { return { base: d.size, s: this.view.scale, ruled: d.ruled === true, pitch: d.rp || M.RULE_PITCH, fmt: (this.editing && this.editing.fmt) || R.fmtOf(d), indent: R.listIndent(d.size), wraps: this.wrapsFor(d) }; }
+  /** Width and offset (css px) of every paragraph of the invisible editor: the middle of the range of widths that breaks it into the canvas' lines (see R.paragraphWraps), anchored on the side the text is aligned to. */
+  wrapsFor(d) {
+    const mw = R.textInnerWidth(d); if (!mw || d.t !== "text") return null;
+    const s = this.view.scale, fmt = (this.editing && this.editing.fmt) || R.fmtOf(d), C = mw * s;
+    return R.paragraphWraps(d).map((o) => {
+      const align = fmt ? fmt.align : (o.rtl ? "right" : "left"), pad = o.indent * s;
+      const t = o.hi === Infinity ? (mw - o.indent) * s + 1.5 : (o.lo + o.hi) / 2 * s, B = t + pad;
+      return { w: t + "px", ml: (align === "right" ? C - B : align === "center" ? (C - B) / 2 : 0) + "px" };
+    });
+  }
   /** Show the edited text through the normal drawing code: the item is replaced by its live version in the list that is drawn. */
   syncLive() {
     const ed = this.editing; if (!ed || !ed.rich) return;
@@ -1645,7 +1679,7 @@ export class Panel {
     if (!d) return;
     this.rt.restyle(this.richCfg(d));
     const mw = R.textInnerWidth(d), L = R.layoutRich(d), l0 = L.lines[0], cs = getComputedStyle(el), bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
-    el.style.width = (mw ? mw : Math.max(140, L.width + d.size)) * s + 1.5 + "px";                 // (1.5 px slack: the editor never wraps before the canvas does)
+    el.style.width = (mw ? mw : Math.max(140, L.width + d.size)) * s + "px";                         // exactly the canvas' text area (editor.js adds its wrap slack per paragraph, on the side the text does not start from)
     el.style.minHeight = l0.h * s + "px"; el.style.padding = R.TEXT_PAD * s + "px";               // (the element covers the whole box, so a click anywhere on it stays in the editor)
     const baseY = v.ty + (oy + d.y + R.TEXT_PAD + l0.base) * s;                                  // where the canvas puts the first baseline
     el.style.left = v.tx + (ox + d.x) * s - bl + "px";
@@ -1655,13 +1689,35 @@ export class Panel {
     const ed = this.editing; if (!ed || !ed.rich) return;
     ed.content = this.rt.getContent();
     if (!this.rt.composing) this.liveFlow();                                  // (never rebuild the editor in the middle of an IME composition)
-    this.syncLive(); this.positionEditor(); this.onRichSel(); this.render();
+    this.syncLive(); this.positionEditor(); this.onRichSel(); this.revealCaret(); this.render();
   }
-  onRichSel() { if (this.editing && this.editing.rich) { this.rstateKey = ""; this.fmtKey = ""; this.render(); } }
+  /** Keep the caret on screen while typing / moving (the browser used to do this by scrolling the stage itself, which shifted the canvas). */
+  revealCaret() {
+    const d = this.editedItem(); if (!d || d.t !== "text" || !this.hasPage) return;
+    const [a, b] = this.rt.getSel(), c = R.caretAt(d, a), [sx, sy] = this.pageToScreen(c.x, c.top), [, sy2] = this.pageToScreen(c.x, c.bottom), w = this.cw, h = this.ch, m = 24;
+    const dx = sx < 0 ? sx - m : sx > w ? sx - (w - m) : 0, dy = sy < 0 ? sy - m : sy2 > h ? sy2 - (h - m) : 0;        // (only when the caret has really left the screen; then it is brought back with a margin)
+    if (dx || dy) this.scrollViewBy(dx, dy);
+  }
+  onRichSel() { if (this.editing && this.editing.rich) { this.rstateKey = ""; this.fmtKey = ""; this.updateFmtUi(); this.caretReset(); this.render(); } }
   onRichKey(e) {
     e.stopPropagation();
     if (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) { e.preventDefault(); this.finishEdit(); return true; }
-    return false;
+    return this.richNavigate(e);
+  }
+  /** Up / Down / Home / End move the caret along the lines the canvas shows (not the invisible copy the browser lays out), keeping the horizontal position. */
+  richNavigate(e) {
+    const k = e.key;
+    if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || (k !== "ArrowUp" && k !== "ArrowDown" && k !== "Home" && k !== "End")) { if (k !== "ArrowUp" && k !== "ArrowDown") this.rt.goalX = null; return false; }
+    const d = this.editedItem(), [a, b] = this.rt.getSel(); if (!d || d.t !== "text" || a !== b) return false;
+    let to = null;
+    if (k === "Home" || k === "End") { const r = R.lineRange(d, a); to = k === "Home" ? r.start : r.end; this.rt.goalX = null; }
+    else {
+      const x = this.rt.goalX ?? R.caretAt(d, a).x, t = R.offsetVertical(d, a, k === "ArrowUp" ? -1 : 1, x);
+      if (t === null) { this.rt.goalX = null; return false; }                                     // first / last line: the browser's own behaviour (jump to the start / end of the text)
+      to = t; this.rt.goalX = x;
+    }
+    e.preventDefault(); this.rt.setSel(to, to); this.onRichSel(); this.revealCaret();
+    return true;
   }
   focusEditor() { if (this.editing && this.editing.rich) this.rt.focus(); else this.ta.focus({ preventScroll: true }); }
   /** The format (direction, alignment, snap to lines) of the edited item changed: show it. */
@@ -1761,7 +1817,7 @@ export class Panel {
   finishRich(ed) {
     ed.content = this.rt.getContent();
     const d = this.editedItem(), pi = this.cur, old = ed.idx !== null ? this.items[ed.idx] : null, empty = !ed.content.text.trim();
-    this.editing = null; this.editingItem = null; this.rt.hide();
+    this.editing = null; this.editingItem = null; this.rt.hide(); this.caretStop();
     this.live = null; this.preview = null;
     const g = GROUP_OF_TOOL[this.tool]; if (g && this.tool !== "select") this.curStyle = { ...this.groups[g] };      // (the caret's size / colour was only shown, not chosen)
     const sameC = old && JSON.stringify([ed.content.text, ed.content.runs, ed.content.lists]) === JSON.stringify([old.text, old.runs || null, old.lists || null]);

@@ -3,7 +3,9 @@
 // This element only provides what a browser is good at: the caret, selection, keyboard / IME input, clipboard and bidi cursor movement.
 // It is built from the content model of richtext.js: one <div class="rp"> per paragraph holding styled <span>s, and it is read back after every input.
 import * as RT from "./richtext.js";
-import { FONT_STACK, ruledLH } from "./render.js";
+import { FONT_STACK, ruledLH, isRtl } from "./render.js";
+
+const SLACK = 1.5;                                      // px a paragraph may be wider than the canvas text area, so floating point rounding can never make the editor wrap before the canvas does
 
 const isPara = (n) => n.nodeType === 1 && n.tagName === "DIV";
 export class RichEditor {
@@ -19,7 +21,7 @@ export class RichEditor {
     on("paste", (e) => { e.preventDefault(); this.insert((e.clipboardData && e.clipboardData.getData("text/plain")) || ""); });
     on("drop", (e) => e.preventDefault()); on("dragstart", (e) => e.preventDefault());
     on("compositionstart", () => { this.composing = true; }); on("compositionend", (e) => { this.composing = false; this.afterInput({ inputType: "insertText", data: e.data, isComposing: false }); });
-    on("blur", () => this.h.onBlur && this.h.onBlur());
+    on("blur", () => this.h.onBlur && this.h.onBlur()); on("pointerdown", () => { this.goalX = null; });
     this.onSel = () => { if (!this.el.hidden && this.inside()) this.h.onSelection && this.h.onSelection(); };
   }
   inside() { const s = document.getSelection(); return !!s && s.rangeCount > 0 && this.el.contains(s.anchorNode); }
@@ -60,14 +62,30 @@ export class RichEditor {
     const { base, s, ruled, pitch, fmt, indent } = this.cfg, root = this.el;
     root.style.fontFamily = FONT_STACK; root.style.fontSize = base * s + "px"; root.style.lineHeight = "0";      // (the line boxes come from the spans, never from the box itself)
     root.style.textAlign = fmt ? fmt.align : "start";
+    let pi = 0;
     for (const p of root.children) {
-      p.dir = fmt ? fmt.dir : "auto";
+      p.dir = fmt ? fmt.dir : "auto"; this.fit(p, pi++);
       p.style.paddingInlineStart = p.dataset.l ? indent * s + "px" : "";
       for (const sp of p.querySelectorAll("span")) {
         const z = sp.dataset.z ? +sp.dataset.z : base;
         sp.style.fontSize = z * s + "px"; sp.style.lineHeight = (ruled ? ruledLH(z, pitch) : z * 1.25) * s + "px";
       }
     }
+  }
+  /** The wrap slack goes on the side a paragraph's text does NOT start from (left-aligned: right; right-aligned: left; centred: half each), so the text itself sits exactly where the canvas draws it. */
+  fit(p, i) {                                          // width / offset from the canvas layout (cfg.wraps), else the plain slack
+    const w = this.cfg.wraps && this.cfg.wraps[i];
+    if (!w) { if (p.style.width) p.style.width = ""; this.slack(p); return; }
+    if (p.style.width !== w.w) p.style.width = w.w;
+    if (p.style.marginLeft !== w.ml) p.style.marginLeft = w.ml;
+    if (p.style.marginRight) p.style.marginRight = "";
+  }
+  slack(p) {
+    const fmt = this.cfg.fmt, align = fmt ? fmt.align : (isRtl(p.textContent) ? "right" : "left");
+    const l = align === "right" ? SLACK : align === "center" ? SLACK / 2 : 0, r = align === "left" ? SLACK : align === "center" ? SLACK / 2 : 0;
+    const ml = l ? -l + "px" : "", mr = r ? -r + "px" : "";
+    if (p.style.marginLeft !== ml) p.style.marginLeft = ml;
+    if (p.style.marginRight !== mr) p.style.marginRight = mr;
   }
   /** The content shown: text + runs + lists, read from the DOM whatever structure the browser made of it. */
   getContent() {
@@ -217,6 +235,7 @@ export class RichEditor {
     if (!this.composing) { const t = e.inputType.startsWith("delete") ? "del" : e.inputType; this.pushUndo(false, t); }
   }
   afterInput(e) {
+    this.goalX = null;
     if (this.composing && e.isComposing !== false) { this.h.onInput && this.h.onInput(); return; }
     let sel = null;
     const typed = e && e.inputType === "insertText" && this.pending && e.data;
@@ -229,8 +248,10 @@ export class RichEditor {
   }
   restyleNew() {                                      // text typed into an unstyled place gets sizes too (new spans / paragraphs the browser made)
     const { base, s, ruled, pitch, fmt, indent } = this.cfg;
+    let pi = 0;
     for (const p of this.el.children) {
       if (fmt ? p.dir !== fmt.dir : p.dir !== "auto") p.dir = fmt ? fmt.dir : "auto";
+      this.fit(p, pi++);
       const pad = p.dataset.l ? indent * s + "px" : ""; if (p.style.paddingInlineStart !== pad) p.style.paddingInlineStart = pad;
       for (const sp of p.querySelectorAll("span")) if (!sp.style.fontSize) { const z = sp.dataset.z ? +sp.dataset.z : base; sp.style.fontSize = z * s + "px"; sp.style.lineHeight = (ruled ? ruledLH(z, pitch) : z * 1.25) * s + "px"; }
     }
