@@ -14,6 +14,8 @@ node --test "tests/unit/*.test.mjs"
 | `test_text.py` | rich text, "what you see while typing is what is saved", save / reopen, text continuing across pages |
 | `test_text_settings.py` | Text tool formatting (bold / italic / underline / size / list) set before a box exists and applied to new boxes |
 | `test_wrap_caret.py` | lines can be filled up to the page edge; the invisible editor and the canvas break lines in the same places, so the caret stays next to the text (zoom, dpr, size, Persian / English, inherited styles) |
+| `test_nodes.py` | mind-map nodes on the notebook / PDF / board: auto-sized to their text, drag to draw, resize by handles in the Node tool (also while typing), + / - text size, minimum size, connectors stay attached |
+| `test_outline.py` | the outline of the text being edited follows every wrap (drawn on the canvas from the text's layout, the editor element has the box's size) |
 | `test_grow.py` | auto-sized text boxes: tap and type, the box starts small and grows from the edge its text is aligned to, wraps at the edge of the usable area of the notebook (ruled: onto the next rule) / PDF page / board, caret and editor lines stay consistent, re-editing keeps growing, bold / size on a selected box refit it |
 | `test_caret_draw.py` | the caret and selection are drawn on the canvas from the text's own layout: caret vs the real ink of the text (sizes, zoom, dpr, Persian / English, left / centre / right), the invisible editor sits exactly on the canvas text and breaks lines in the same places, blinking, selection, Up / Down / Home / End |
 | `test_tools_paper.py` | Reset to default per tool, independent tool settings, paper types and settings, right-to-left notebooks |

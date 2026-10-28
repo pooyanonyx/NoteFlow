@@ -44,8 +44,9 @@ with sync_playwright() as pw:
     kb.press("Control+z")
     C.check("Ctrl+Z in the editor undoes the last editing step", a.ev("() => noteflow.panels.nb.rt.getContent().lists")[-1] == "n")
     # --- what is seen while typing is exactly what is stored (same canvas pixels before / after closing the editor)
-    box = a.ev("() => { const r = noteflow.panels.nb.rt.el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; }")
-    clip = {"x": box[0] + 2, "y": box[1] + 2, "width": min(box[2] - 4, 420), "height": box[3] - 4}
+    box = a.ev("""async () => { const R = await import('./js/render.js'), p = noteflow.panels.nb, d = p.editedItem(), v = p.view, s = v.scale, [ox, oy] = p.origin(), sc = p.stage.getBoundingClientRect(), b = R.textBox(d);
+      return [sc.left + v.tx + (ox + b[0]) * s, sc.top + v.ty + (oy + b[1]) * s, (b[2] - b[0]) * s, (b[3] - b[1]) * s]; }""")      # (the box of the text on the canvas: the editor element is aligned by its first baseline, not by its top edge)
+    clip = {"x": box[0] + 7, "y": box[1] + 7, "width": min(box[2] - 14, 420), "height": box[3] - 14}      # (inside the dashed outline of the box, which is drawn while editing and gone afterwards)
     a.page.wait_for_timeout(700)                                     # (caret blink)
     kb.press("End")
     before = shot(a, clip=clip)[:, :, 0]

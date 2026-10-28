@@ -144,7 +144,8 @@ input.hex { grid-column:2 / span 2; text-transform:uppercase; }
 #app[data-narrow="true"] .segbtn { padding:5px 12px; }
 
 /* ---- rich text editor: the text is drawn on the page canvas, this element only provides caret, selection and input (its own text is invisible) */
-.editor.rt { position:absolute; z-index:5; margin:0; padding:0; box-sizing:content-box; border:1.5px dashed var(--accent); border-radius:2px; outline:none; background:transparent;
+.editor.rt { position:absolute; z-index:5; margin:0; padding:0; box-sizing:content-box; border:1.5px solid transparent; border-radius:2px;   /* (invisible: the outline of the box is drawn on the canvas from the layout of the text; the border only keeps the geometry) */
+  outline:none; background:transparent;
   white-space:pre-wrap; overflow-wrap:anywhere; word-break:normal; overflow:visible; color:transparent; -webkit-text-fill-color:transparent; caret-color:transparent;
   text-rendering:geometricPrecision; font-kerning:normal; cursor:text; -webkit-user-select:text; user-select:text; -webkit-text-size-adjust:none; }
 .editor.rt[hidden] { display:none; }

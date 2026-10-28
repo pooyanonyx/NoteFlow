@@ -263,6 +263,7 @@ export function sanitizeItem(d) {
         x1: num(d.x1), y1: num(d.y1), x2: num(d.x2), y2: num(d.y2), text: str(d.text), color: color(d.color),
         w: Math.max(0.1, num(d.w)), size: Math.min(400, Math.max(4, num(d.size))) };
       if (typeof d.fill === "string") { try { out.fill = color(d.fill); } catch { /* ignore bad optional value */ } }
+      if (d.g === true) out.g = true;                                                            // g: auto-sized, the box follows its text (a node resized by hand has no g)
       return addFmt(d, addExtras(d, out));
     }
     if (t === "conn") {
@@ -488,6 +489,7 @@ export function resizeItem(d, handle, px, py, textBox = null, e = 0, keepAspect 
   }
   if (t === "rect" || t === "ellipse" || t === "shape" || t === "node" || t === "hl" || t === "image") {
     n.x1 = round2(x0); n.y1 = round2(y0); n.x2 = round2(x1); n.y2 = round2(y1);
+    if (t === "node") delete n.g;                                                              // a size dragged by hand is kept from now on
   } else if (t === "note") {
     n.x = round2(x0); n.y = round2(y0); n.w = round2(Math.max(60, x1 - x0)); n.h = round2(Math.max(40, y1 - y0));
   } else if (t === "pen" || t === "mark") {

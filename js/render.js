@@ -621,6 +621,11 @@ export function nodeFit(d, text, domTextH = 0) {
   const textH = Math.max(L.height, domTextH);                 // domTextH: what the real text box needed (it may wrap a line differently from the canvas)
   return { w: Math.max(M.NODE_MIN_W, Math.min(M.NODE_MAX_W, Math.ceil((L.width + 2 * pad) * ell))), h: Math.max(M.NODE_MIN_H, Math.ceil((textH + 2 * pad) * ell)), textH };
 }
+/** Height a node of width w needs for this text (the text wraps at that width, exactly as drawItem draws it). */
+export function nodeFitAt(d, text, w) {
+  const ell = nodeEll(d), pad = M.NODE_PAD, L = layoutText(measureCtx(), text || " ", d.size, Math.max(10, (w - 2 * pad) / ell), nodeFmt({ ...d, text }));
+  return { h: Math.max(M.NODE_MIN_H, Math.ceil((L.height + 2 * pad) * ell)), textH: L.height };
+}
 function nodePath(ctx, d) {
   const x = Math.min(d.x1, d.x2), y = Math.min(d.y1, d.y2), w = Math.abs(d.x2 - d.x1), h = Math.abs(d.y2 - d.y1);
   ctx.beginPath();

@@ -30,6 +30,8 @@ const GROUP_OF_TOOL = T.TOOL_GROUP;                // every creating tool has it
 const MIND_TOOLS = ["node", "link"];                  // on every panel (PDF, notebook, board) these two tools live in one "Mind map" menu button
 const OLD_SHAPE_TOOLS = ["line", "arrow", "rect", "ellipse"];     // separate tools of older versions / workspaces -> Shapes tool
 const STYLE_TO_ITEM = { color: "color", width: "w", size: "size", alpha: "alpha", bright: "bright" };
+const SIZE_LADDER = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 72, 96, 128];
+const stepSize = (z, dir) => (dir > 0 ? SIZE_LADDER.find((x) => x > z + 0.01) ?? z : [...SIZE_LADDER].reverse().find((x) => x < z - 0.01) ?? z);
 const HANDLE_R = 7;                       // drawn handle radius (screen px)
 const MAX_IMAGE_SIDE = 2400;
 const GAP = 12;                      // space between pages in the continuous PDF view (page units)
@@ -684,7 +686,14 @@ export class Panel {
     }
     ctx.restore();
     const list = this.drawList;
-    if (this.selected !== null && list[this.selected] && !this.editing) this.drawHandles(ctx, list[this.selected]);
+    const hs = this.handleSubject(list); if (hs) this.drawHandles(ctx, hs.d, hs.i);
+  }
+  /** The item the resize handles belong to: the selected one, or the node whose text is being typed (it can be resized without leaving the editor). None with the Link tool. */
+  handleSubject(list = this.drawList) {
+    if (this.tool === "link") return null;
+    const ed = this.editing;
+    if (ed) { const d = ed.idx === null ? ed.proto : list[ed.idx]; return d && d.t === "node" && !ed.rich ? { d, i: ed.idx } : null; }
+    return this.selected !== null && list[this.selected] ? { d: list[this.selected], i: this.selected } : null;
   }
   /** The caret and the selection of the text box that is being edited, drawn in the same frame as its text and from the same layout (render.js caretAt / selectionRects).
    *  The editor element only supplies the character offsets: where they are on the page is never read back from the browser's own text engine. */
@@ -708,9 +717,16 @@ export class Panel {
   }
   caretStop() { clearInterval(this.caretTimer); this.caretTimer = 0; this.caretOn = true; }
   /** The light backing of a free text box while it is edited (on ruled paper the lines show through). */
+  /** The box of the text being edited: a light backing (not on ruled paper / a blackboard) and the dashed outline. Both come from the same layout as the text and are drawn in the same
+   *  frame, so the outline follows every wrap at once (the browser's element for it used to be sized by the browser's own, later, layout of an invisible copy of the text). */
   drawEditBg(ctx, d) {
-    if (d.t !== "text" || d.ruled === true || (this.kind === "board" && R.boardTheme(this.pages[this.cur].paper))) return;     // (not on a blackboard: light text on a white patch would vanish)
-    const b = R.textBox(d); ctx.save(); ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.fillRect(b[0], b[1], b[2] - b[0], b[3] - b[1]); ctx.restore();
+    if (d.t !== "text") return;
+    const b = R.textBox(d), s = this.view.scale; ctx.save();
+    if (d.ruled !== true && !(this.kind === "board" && R.boardTheme(this.pages[this.cur].paper))) { ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.fillRect(b[0], b[1], b[2] - b[0], b[3] - b[1]); }
+    if (!this.caretColor) this.caretColor = getComputedStyle(this.stage).getPropertyValue("--accent").trim() || "#1976d2";
+    ctx.strokeStyle = this.caretColor; ctx.lineWidth = 1.5 / s; ctx.setLineDash([5 / s, 3.5 / s]);
+    ctx.strokeRect(b[0] - 0.75 / s, b[1] - 0.75 / s, b[2] - b[0] + 1.5 / s, b[3] - b[1] + 1.5 / s);
+    ctx.restore();
   }
   /** Bitmap of a finished page (notebook: paper + items; PDF: the annotations). Rebuilt when its items / paper / fonts / pictures change or the zoom moved a lot. */
   pageLayer(i, w, h, page) {
@@ -761,7 +777,7 @@ export class Panel {
     return map;
   }
   selInfo(d, i) {
-    const g = this.geom(i), e = 3 / Math.max(1, this.view.scale * 0.6) + M.halfWidth(d);      // handle gap in page units
+    const g = i === null ? M.geomBox(d) : this.geom(i), e = 3 / Math.max(1, this.view.scale * 0.6) + M.halfWidth(d);      // handle gap in page units
     return { g, e, pos: M.handlePositions(d, g, e) };
   }
   drawSelection(ctx, d) {
@@ -778,8 +794,8 @@ export class Panel {
     else ctx.strokeRect(g[0] - e, g[1] - e, g[2] - g[0] + 2 * e, g[3] - g[1] + 2 * e);
     ctx.restore();
   }
-  drawHandles(ctx, d) {
-    const { pos } = this.selInfo(d, this.selected), v = this.view;
+  drawHandles(ctx, d, i = this.selected) {
+    const { pos } = this.selInfo(d, i), v = this.view;
     ctx.save(); ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     for (const [x, y] of Object.values(pos)) {
       const [hx, hy] = this.pageToScreen(x, y);
@@ -789,8 +805,8 @@ export class Panel {
     ctx.restore();
   }
   handleAt(sx, sy, ptype) {
-    if (this.selected === null || !this.items[this.selected]) return null;
-    const { pos } = this.selInfo(this.items[this.selected], this.selected, this.items), v = this.view;
+    const hs = this.handleSubject(this.items); if (!hs) return null;
+    const { pos } = this.selInfo(hs.d, hs.i), v = this.view;
     const r = ptype === "touch" ? 24 : 14;
     let best = null, bd = r;
     for (const [name, [x, y]] of Object.entries(pos)) {
@@ -897,13 +913,14 @@ export class Panel {
     this.stopFling();
     const inEditor = e.target === this.ta || this.rt.el.contains(e.target);
     const wasEditing = !!this.editing && !inEditor;
+    const l0 = this.local(e), onNodeHandle = wasEditing && (this.tool === "node" || this.tool === "select") && !!this.handleAt(l0.x, l0.y, e.pointerType);      // (checked before the editor closes)
     if (wasEditing) this.finishEdit();
     if (inEditor) return;
     e.preventDefault();
     this.stage.setPointerCapture(e.pointerId);
     const l = this.local(e);
     this.pointers.set(e.pointerId, { x: l.x, y: l.y, type: e.pointerType });
-    if (wasEditing && this.pointers.size === 1) { this.action = { type: "none" }; return; }       // this tap only closes the editor
+    if (wasEditing && this.pointers.size === 1 && !(onNodeHandle && this.selected !== null)) { this.action = { type: "none" }; return; }       // this tap only closes the editor (a press on a handle of the node just typed goes on to resize it)
     if (e.pointerType === "pen") this.lastPen = performance.now();
     if (this.pointers.size === 2) { this.startGesture(); return; }
     if (this.pointers.size > 2) return;
@@ -973,7 +990,9 @@ export class Panel {
     if (t === "shape" || t === "hltext") { this.action = { type: "shape", p0: this.clampP(p), l0: l, moved: false }; return; }
     if (t === "eraser") { this.live = this.items.slice(); this.action = { type: "erase", last: p, changed: false }; this.eraseAt(p); return; }
     if (t === "text" || t === "note") { this.action = { type: "tap", p, l0: l, moved: false }; return; }
-    if (t === "node") {                                       // tap empty space = new node; an item that is hit is selected / moved like with Select
+    if (t === "node") {                                       // tap empty space = new auto-sized node, drag = a node of the dragged size; an item that is hit is selected / moved / resized like with Select
+      const h = this.handleAt(l.x, l.y, e.pointerType);
+      if (h) { this.action = { type: "resize", h, orig: this.items[this.selected], tbox: this.geom(this.selected, this.items), base: this.items.slice(), e: this.selInfo(this.items[this.selected], this.selected).e }; return; }
       const idx = this.hit(p);
       if (idx !== null) { this.selected = idx; this.action = { type: "move", idx, p0: p, orig: this.items[idx], moved: false, l0: l }; this.render(); }
       else { this.selected = null; this.action = { type: "nodetap", p, l0: l, moved: false }; this.render(); }
@@ -1018,11 +1037,11 @@ export class Panel {
     if (a.type === "resize") {
       const c = this.clampP(p);
       this.live = this.items.slice();
-      this.live[this.selected] = this.settle(M.resizeItem(a.orig, a.h, c.x, c.y, a.tbox, a.e, e.shiftKey));
+      this.live[this.selected] = this.clampNode(this.settle(M.resizeItem(a.orig, a.h, c.x, c.y, a.tbox, a.e, e.shiftKey)), a.h);
       this.render(); return;
     }
     if (a.type === "tap" && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 8) a.moved = true;
-    if (a.type === "nodetap" && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 8) a.moved = true;
+    if (a.type === "nodetap" && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 8) { a.moved = true; this.preview = [this.dragNode(a.p, this.clampP(p))]; this.render(); }
     if (a.type === "link") {
       const c = this.clampP(p), idx = this.hit(c), tn = idx !== null && this.items[idx].t === "node" && this.items[idx].id !== a.from ? this.items[idx].id : null;
       this.linkTarget = tn; const st = this.curStyle;
@@ -1073,6 +1092,7 @@ export class Panel {
     }
     if (a.type === "tap" && !a.moved) this.tapCreate(a.p);
     if (a.type === "nodetap" && !a.moved) this.createNodeAt(a.p);
+    if (a.type === "nodetap" && a.moved) { const n = this.dragNode(a.p, this.clampP(p)); this.preview = null; this.startEdit(null, n, null); }
     if (a.type === "link") this.finishLink(a, this.clampP(p));
   }
   deleteSelected() {
@@ -1362,10 +1382,13 @@ export class Panel {
       round: mb("node", "Rounded nodes", () => this.setNodeKind("round")),
       ellipse: mb("ellipse", "Oval nodes", () => this.setNodeKind("ellipse")),
       rect: mb("rect", "Square nodes", () => this.setNodeKind("rect")),
+      smaller: mb("minus", "Smaller text in the node (the selected node, or new nodes)", () => this.nodeSizeStep(-1)),
+      bigger: mb("plus", "Bigger text in the node (the selected node, or new nodes)", () => this.nodeSizeStep(1)),
     };
+    this.nodeSizeLbl = el("span", { class: "sizelbl", title: "Text size of the node" });
     const B = this.mindBtns;
     this.mindGroup = el("span", { class: "fmtgrp mindgrp", role: "group", "aria-label": "Mind map", hidden: true },
-      B.child, B.sibling, B.branch, sep(), B.curve, B.line, B.elbow, sep(), B.arrow, sep(), B.round, B.ellipse, B.rect);   // connector type | arrowheads on / off | node shape
+      B.child, B.sibling, B.branch, sep(), B.curve, B.line, B.elbow, sep(), B.arrow, sep(), B.round, B.ellipse, B.rect, sep(), B.smaller, this.nodeSizeLbl, B.bigger);   // connector type | arrowheads on / off | node shape | text size
     for (const ev of ["pointerdown", "mousedown"]) this.mindGroup.addEventListener(ev, (e) => e.preventDefault());
   }
   selItem() { return this.selected !== null ? (this.items[this.selected] || null) : null; }
@@ -1377,10 +1400,12 @@ export class Panel {
   }
   updateMindUi() {
     const m = this.mindState(), hasParent = !!m.node && this.items.some((c) => c.t === "conn" && c.to === m.node.id);
-    const key = [m.show, !!m.node, hasParent, !!m.conn, m.style, m.arrow, m.kind].join("|");
+    const sz = m.node ? m.node.size : (this.editing && !this.editing.rich && this.editing.proto && this.editing.proto.t === "node" ? this.editing.proto.size : this.curStyle.size);
+    const key = [m.show, !!m.node, hasParent, !!m.conn, m.style, m.arrow, m.kind, sz].join("|");
     if (key === this.mindKey) return;
     this.mindKey = key; this.mindGroup.hidden = !m.show;
-    const B = this.mindBtns;
+    const B = this.mindBtns; this.nodeSizeLbl.textContent = String(Math.round(sz * 10) / 10);
+    B.smaller.disabled = B.bigger.disabled = !!m.conn;
     B.child.disabled = !m.node; B.sibling.disabled = !hasParent; B.branch.disabled = !m.node;
     const on = { curve: m.style === "curve", line: m.style === "line", elbow: m.style === "elbow", arrow: m.arrow, round: m.kind === "round", ellipse: m.kind === "ellipse", rect: m.kind === "rect" };
     for (const [k, v] of Object.entries(on)) { B[k].classList.toggle("on", v); B[k].setAttribute("aria-pressed", String(v)); }
@@ -1405,11 +1430,55 @@ export class Panel {
     const [PW, PH] = this.pageDims();
     x1 = clamp(x1, 10, PW - w - 10); y1 = clamp(y1, 10, PH - h - 10);
     const n = { t: "node", id: M.newId(), kind: this.nodeKind, x1: r2(x1), y1: r2(y1), x2: r2(x1 + w), y2: r2(y1 + h), text: "", color: st.color,
-      w: Math.max(1.5, st.width), size: st.size, dir: f.dir, align: "center", ...this.styleExtra() };
+      w: Math.max(1.5, st.width), size: st.size, g: true, dir: f.dir, align: "center", ...this.styleExtra() };
     if (this.fillOn) n.fill = st.color;
     return n;
   }
   connProto(from, to) { const st = this.curStyle; return { t: "conn", from, to, style: this.connStyle, arrow: this.connArrow, color: st.color, w: Math.max(1.5, st.width) }; }
+  /** A node drawn by dragging (like a shape): its box is the dragged rectangle (at least 60 x 36), sized by hand, so it has no g. */
+  dragNode(p0, p1) {
+    const x1 = Math.min(p0.x, p1.x), y1 = Math.min(p0.y, p1.y), n = this.nodeProto(x1, y1, Math.max(60, Math.abs(p1.x - p0.x)), Math.max(36, Math.abs(p1.y - p0.y)));
+    delete n.g; return n;
+  }
+  /** A node being resized never gets narrower than 60 or lower than its text needs at that width; the side that is not dragged stays. */
+  clampNode(n, h) {
+    if (n.t !== "node") return n;
+    let x1 = Math.min(n.x1, n.x2), x2 = Math.max(n.x1, n.x2), y1 = Math.min(n.y1, n.y2), y2 = Math.max(n.y1, n.y2);
+    if (x2 - x1 < 60) { if (h.includes("w")) x1 = x2 - 60; else x2 = x1 + 60; }
+    const need = R.nodeFitAt(n, n.text, x2 - x1).h;
+    if (y2 - y1 < need) { if (h.includes("n")) y1 = y2 - need; else y2 = y1 + need; }
+    const r2 = (v) => Math.round(v * 100) / 100;
+    return { ...n, x1: r2(x1), y1: r2(y1), x2: r2(x2), y2: r2(y2) };
+  }
+  /** A node after its text, text size or format changed: an auto-sized one (g) is exactly as big as its text needs (it also shrinks); one sized by hand keeps its width and
+   *  only gets taller if its text needs it. The top left corner stays; the node is kept on the page; its connectors follow because they are drawn from the node's box. */
+  fitNode(d, domH = 0) {
+    if (d.t !== "node") return d;
+    const x1 = Math.min(d.x1, d.x2), y1 = Math.min(d.y1, d.y2), w0 = Math.abs(d.x2 - d.x1), h0 = Math.abs(d.y2 - d.y1), [PW, PH] = this.pageDims(), r2 = (v) => Math.round(v * 100) / 100;
+    let w, h;
+    if (d.g) { const f = R.nodeFit(d, d.text, domH); w = f.w; h = f.h; } else { w = w0; h = Math.max(h0, R.nodeFitAt(d, d.text, w0).h); }
+    const nx = Math.max(0, Math.min(x1, PW - w - 4)), ny = Math.max(0, Math.min(y1, PH - h - 4));
+    return { ...d, x1: r2(nx), y1: r2(ny), x2: r2(nx + w), y2: r2(ny + h) };
+  }
+  /** The + / − buttons of the Mind map group: the text size of the selected node (the node follows), or of the next nodes when none is selected. While a node is typed the change is live. */
+  nodeSizeStep(dir) {
+    const ed = this.editing;
+    if (ed && !ed.rich) {
+      const d = ed.idx === null ? ed.proto : this.items[ed.idx];
+      if (d && d.t === "node") {
+        const z = stepSize(d.size, dir); if (z === d.size) return;
+        if (ed.idx === null) { ed.proto.size = z; this.curStyle = { ...this.curStyle, size: z }; this.positionEditor(); }
+        else { const keep = ed.idx, ta = this.ta.value; this.finishEdit(); const n = this.items[keep]; if (n) { const items = this.items.slice(); items[keep] = this.fitNode({ ...n, size: z }); this.commit(items, { keepSel: true }); this.startEdit(keep); void ta; } }
+        this.mindKey = ""; this.updateMindUi(); this.render(); return;
+      }
+    }
+    const d = this.selNode();
+    if (d) {
+      const z = stepSize(d.size, dir);
+      if (z !== d.size) { const items = this.items.slice(); items[this.selected] = this.fitNode({ ...d, size: z }); this.commit(items, { keepSel: true }); }
+    } else { const z = stepSize(this.curStyle.size, dir); this.curStyle = { ...this.curStyle, size: z }; const g = GROUP_OF_TOOL[this.tool]; if (g) this.groups[g] = { ...this.curStyle }; }
+    this.mindKey = ""; this.updateMindUi(); this.render();
+  }
   createNodeAt(p) { const n = this.nodeProto(p.x - 60, p.y - 24); this.startEdit(null, n, null); }
   revealBox(x1, y1, x2, y2) {                        // scroll just enough to see a box
     const v = this.view, s = v.scale, [ox, oy] = this.origin(), m = 50;
@@ -1710,7 +1779,7 @@ export class Panel {
     this.rt.restyle(this.richCfg(d));
     const mw = R.textInnerWidth(d), L = R.layoutRich(d), l0 = L.lines[0], cs = getComputedStyle(el), bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
     el.style.width = (mw ? mw : Math.max(140, L.width + d.size)) * s + "px";                         // exactly the canvas' text area (editor.js adds its wrap slack per paragraph, on the side the text does not start from)
-    el.style.minHeight = l0.h * s + "px"; el.style.padding = R.TEXT_PAD * s + "px";               // (the element covers the whole box, so a click anywhere on it stays in the editor)
+    el.style.height = Math.max(l0.h, L.height) * s + "px"; el.style.minHeight = l0.h * s + "px"; el.style.padding = R.TEXT_PAD * s + "px";   // (the element covers exactly the canvas' box, so a click anywhere on it stays in the editor; its height is never left to the browser's own layout of the invisible text)
     const baseY = v.ty + (oy + d.y + R.TEXT_PAD + l0.base) * s;                                  // where the canvas puts the first baseline
     el.style.left = v.tx + (ox + d.x) * s - bl + "px";
     el.style.top = baseY - R.domBaseline(l0.maxSize * s, l0.h * s) - R.TEXT_PAD * s - bt + "px";   // so the caret of the first line sits on it, whatever the font
@@ -1811,7 +1880,8 @@ export class Panel {
         const d = { ...ed.proto, text, ...(ed.fmt || {}) };
         if (d.t === "note") d.h = Math.round(Math.max(d.h, R.noteNeededHeight(d, text)) * 100) / 100;
         if (d.t === "node") {                                   // size the new node to its text; it stays selected (Tab / Enter continue the map)
-          const fit = R.nodeFit(d, text, ed.domH || 0); d.x2 = Math.round((d.x1 + fit.w) * 100) / 100; d.y2 = Math.round((d.y1 + fit.h) * 100) / 100;
+          const fit = R.nodeFit(d, text, ed.domH || 0), w = d.g ? fit.w : Math.max(60, Math.abs(d.x2 - d.x1)), h = d.g ? fit.h : Math.max(Math.abs(d.y2 - d.y1), fit.h);
+          d.x2 = Math.round((d.x1 + w) * 100) / 100; d.y2 = Math.round((d.y1 + h) * 100) / 100;
           const at = this.items.length; this.commit([...this.items, d, ...(ed.extra || [])], { select: at });
         } else this.commit([...this.items, d]);
       } else { this.preview = null; this.render(); }
@@ -1828,10 +1898,14 @@ export class Panel {
     if (old.t === "node") {
       const fmtCh = !!ed.fmt && (ed.fmt.dir !== old.dir || ed.fmt.align !== old.align);
       if (text !== old.text || fmtCh) {
-        const d = { ...old, text, ...(ed.fmt || {}) }, fit = R.nodeFit(d, text, ed.domH || 0);       // a node only grows to fit its text (a size set by hand is kept)
-        d.x2 = Math.round((Math.min(d.x1, d.x2) + Math.max(Math.abs(old.x2 - old.x1), fit.w)) * 100) / 100;
-        d.y2 = Math.round((Math.min(d.y1, d.y2) + Math.max(Math.abs(old.y2 - old.y1), fit.h)) * 100) / 100;
-        d.x1 = Math.min(old.x1, old.x2); d.y1 = Math.min(old.y1, old.y2);
+        let d = { ...old, text, ...(ed.fmt || {}) };
+        if (old.g) d = this.fitNode(d, ed.domH || 0);                                             // auto-sized: exactly as big as the new text
+        else {                                                                                     // sized by hand (or an older node): only grows to fit its text
+          const fit = R.nodeFit(d, text, ed.domH || 0);
+          d.x2 = Math.round((Math.min(d.x1, d.x2) + Math.max(Math.abs(old.x2 - old.x1), fit.w)) * 100) / 100;
+          d.y2 = Math.round((Math.min(d.y1, d.y2) + Math.max(Math.abs(old.y2 - old.y1), fit.h)) * 100) / 100;
+          d.x1 = Math.min(old.x1, old.x2); d.y1 = Math.min(old.y1, old.y2);
+        }
         items[ed.idx] = d; this.commit(items, { keepSel: true });
       } else this.render();
       return;
@@ -1930,11 +2004,12 @@ export class Panel {
     ta.classList.add("node"); ta.classList.remove("conn");
     ta.style.fontSize = d.size * s + "px"; ta.style.lineHeight = "1.25"; ta.style.fontFamily = R.FONT_STACK;
     const x1 = Math.min(d.x1, d.x2), y1 = Math.min(d.y1, d.y2), pre = R.nodeFit(d, ta.value), ell = R.nodeEll(d);
-    const w0 = ed.idx === null ? pre.w : Math.max(Math.abs(d.x2 - d.x1), pre.w), mw = Math.max(10, (w0 - 2 * M.NODE_PAD) / ell);
+    const auto = !!d.g;                                                                      // auto-sized: exactly as big as its text (grows and shrinks); sized by hand: its width, taller if the text needs it
+    const w0 = auto ? pre.w : ed.idx === null ? Math.max(60, Math.abs(d.x2 - d.x1)) : Math.max(Math.abs(d.x2 - d.x1), pre.w), mw = Math.max(10, (w0 - 2 * M.NODE_PAD) / ell);
     ta.style.width = mw * s + 1.5 + "px"; ta.style.height = "1px";                          // (1.5 px slack so the box never wraps earlier than the canvas)
     const domH = ta.scrollHeight / s;
     ed.domH = domH;
-    const fit = R.nodeFit(d, ta.value, domH), w = w0, h = ed.idx === null ? fit.h : Math.max(Math.abs(d.y2 - d.y1), fit.h);
+    const fit = R.nodeFit(d, ta.value, domH), w = w0, h = auto ? fit.h : Math.max(Math.abs(d.y2 - d.y1), fit.h);
     if (ed.idx === null) { d.x2 = x1 + w; d.y2 = y1 + h; }                                    // proto (still a preview): grows with the text
     else if (Math.abs(d.x2 - d.x1) !== w || Math.abs(d.y2 - d.y1) !== h) { this.live = this.items.slice(); this.live[ed.idx] = { ...d, x1, y1, x2: x1 + w, y2: y1 + h }; }
     ta.style.left = v.tx + (ox + x1 + (w - mw) / 2) * s + "px"; ta.style.top = v.ty + (oy + y1 + (h - fit.textH) / 2) * s + "px";
