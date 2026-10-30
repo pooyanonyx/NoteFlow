@@ -1,6 +1,6 @@
 # NoteFlow tests
 
-**Unit tests** (`tests/unit/*.test.mjs`, Node's built-in runner, nothing to install) cover the pure modules: paper geometry, caret / selection / hit-test geometry, rich text model, bidi, text layout (with a stub font measurer), page flow, file format round trips, tool defaults and project consistency (offline file list, module imports).
+**Unit tests** (`tests/unit/*.test.mjs`, Node's built-in runner, nothing to install) cover the pure modules: paper geometry, caret / selection / hit-test geometry, rich text model (also colour inside text), bidi, text layout (with a stub font measurer), page flow, file format round trips, tool defaults and project consistency (offline file list, module imports).
 
 ```
 node --test "tests/unit/*.test.mjs"
@@ -13,6 +13,7 @@ node --test "tests/unit/*.test.mjs"
 | `test_ruled.py`, `test_extra.py` | writing on the lines of lined paper (baselines on rules at every zoom / dpi), snap to lines, boards |
 | `test_text.py` | rich text, "what you see while typing is what is saved", save / reopen, text continuing across pages |
 | `test_text_settings.py` | Text tool formatting (bold / italic / underline / size / list) set before a box exists and applied to new boxes |
+| `test_text_midformat.py` | formatting while typing: colour / size / bold / italic / underline changed in the middle of a sentence from the toolbar, the Color popup, the Brush sliders and the custom colour dialog without leaving the text (caret, selection, keyboard and content stay; selection or next-typed text only; one undo step per slider drag; Persian / English / mixed; leaving the box still works) |
 | `test_wrap_caret.py` | lines can be filled up to the page edge; the invisible editor and the canvas break lines in the same places, so the caret stays next to the text (zoom, dpr, size, Persian / English, inherited styles) |
 | `test_nodes.py` | mind-map nodes on the notebook / PDF / board: auto-sized to their text, drag to draw, resize by handles in the Node tool (also while typing), + / - text size, minimum size, connectors stay attached |
 | `test_outline.py` | the outline of the text being edited follows every wrap (drawn on the canvas from the text's layout, the editor element has the box's size) |

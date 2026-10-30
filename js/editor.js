@@ -11,7 +11,8 @@ const isPara = (n) => n.nodeType === 1 && n.tagName === "DIV";
 export class RichEditor {
   constructor(handlers = {}) {
     this.h = handlers; this.cfg = { base: 16, s: 1, ruled: false, pitch: 24, fmt: null, indent: 24 };
-    this.pending = null; this.undoStack = []; this.redoStack = []; this.lastPush = 0; this.lastType = ""; this.composing = false;
+    this.pending = null; this.pendingAt = null; this.undoStack = []; this.redoStack = []; this.lastPush = 0; this.lastType = ""; this.composing = false;
+    this.away = false; this.merge = null;                // away: the keyboard focus is on a toolbar control (slider ...), the caret / selection are kept and edits are applied without touching the DOM selection (see resume)
     this.el = document.createElement("div");
     Object.assign(this.el, { className: "editor rt", hidden: true, contentEditable: "true", spellcheck: false });
     this.el.setAttribute("role", "textbox"); this.el.setAttribute("aria-multiline", "true"); this.el.setAttribute("aria-label", "Text");
@@ -21,13 +22,26 @@ export class RichEditor {
     on("paste", (e) => { e.preventDefault(); this.insert((e.clipboardData && e.clipboardData.getData("text/plain")) || ""); });
     on("drop", (e) => e.preventDefault()); on("dragstart", (e) => e.preventDefault());
     on("compositionstart", () => { this.composing = true; }); on("compositionend", (e) => { this.composing = false; this.afterInput({ inputType: "insertText", data: e.data, isComposing: false }); });
-    on("blur", () => this.h.onBlur && this.h.onBlur()); on("pointerdown", () => { this.goalX = null; });
-    this.onSel = () => { if (!this.el.hidden && this.inside()) this.h.onSelection && this.h.onSelection(); };
+    on("blur", (e) => this.h.onBlur && this.h.onBlur(e)); on("focus", () => { const back = this.away && this.lastSel; this.away = false; if (back) this.setSel(back[0], back[1]); });   // (the keyboard comes back from a toolbar control: the caret / selection are where they were left, not where the browser puts a caret on a refocused field) on("pointerdown", () => { this.goalX = null; });
+    this.onSel = () => {
+      if (this.el.hidden || this.away || !this.inside()) return;         // (away: the remembered selection is the truth; the DOM one may just have been reset by a rebuild)
+      const sel = this.getSel();                        // (also remembers the selection for when the focus is elsewhere)
+      if (this.pending && this.pendingAt !== null && (sel[0] !== this.pendingAt || sel[1] !== this.pendingAt)) this.pending = null;   // the caret moved away: what was set for the next typed text no longer applies (as in a word processor)
+      this.h.onSelection && this.h.onSelection();
+    };
   }
   inside() { const s = document.getSelection(); return !!s && s.rangeCount > 0 && this.el.contains(s.anchorNode); }
   show() { this.el.hidden = false; document.addEventListener("selectionchange", this.onSel); }
-  hide() { this.el.hidden = true; document.removeEventListener("selectionchange", this.onSel); this.undoStack = []; this.redoStack = []; this.pending = null; }
+  hide() { this.el.hidden = true; document.removeEventListener("selectionchange", this.onSel); this.undoStack = []; this.redoStack = []; this.pending = null; this.pendingAt = null; this.away = false; this.merge = null; }
   focus() { this.el.focus({ preventScroll: true }); }
+  /** Give the keyboard back to the text after a toolbar control had it: the caret / selection are exactly where they were left. */
+  resume() {
+    if (this.el.hidden) return;
+    this.away = false; this.focus();
+    const [a, b] = this.lastSel || [0, 0]; this.setSel(a, b);
+  }
+  hasFocus() { return document.activeElement === this.el; }
+  setPending(p) { this.pending = p; this.pendingAt = this.getSel()[0]; }
 
   // ------------------------------------------------------------ content <-> DOM
   /** Replace what is shown by `content`. cfg: {base, s, ruled, pitch, fmt, indent}. sel = [a, b] puts the caret there. */
@@ -53,6 +67,7 @@ export class RichEditor {
   spanEl(text, st) {
     const s = document.createElement("span");
     if (st.b) s.dataset.b = "1"; if (st.i) s.dataset.i = "1"; if (st.u) s.dataset.u = "1"; if (st.z !== undefined && st.z !== null) s.dataset.z = String(st.z);
+    if (st.c) s.dataset.c = st.c;
     if (text) s.textContent = text;
     return s;
   }
@@ -98,6 +113,7 @@ export class RichEditor {
         if (d.i === "1" || e.tagName === "I" || e.tagName === "EM") st.i = 1;
         if (d.u === "1" || e.tagName === "U") st.u = 1;
         if (d.z && st.z === undefined) st.z = +d.z;
+        if (d.c && st.c === undefined) st.c = d.c;
       }
       return st;
     };
@@ -124,7 +140,7 @@ export class RichEditor {
     });
     return RT.makeContent(text, runs, lists);
   }
-  stOf(r) { const o = {}; for (const k of ["b", "i", "u", "z"]) if (r[k] !== undefined) o[k] = r[k]; return o; }
+  stOf(r) { const o = {}; for (const k of ["b", "i", "u", "z", "c"]) if (r[k] !== undefined) o[k] = r[k]; return o; }
   /** Is the DOM in the shape this editor builds (paragraph divs directly in the root)? */
   canonical() { return [...this.el.childNodes].every((n) => isPara(n)) && this.el.childNodes.length > 0; }
 
@@ -156,12 +172,13 @@ export class RichEditor {
   }
   getSel() {
     const s = document.getSelection();
-    if (!s || !s.rangeCount || !this.el.contains(s.anchorNode)) return this.lastSel || [0, 0];
+    if (this.away || !s || !s.rangeCount || !this.el.contains(s.anchorNode)) return this.lastSel || [0, 0];
     const a = this.offsetOf(s.anchorNode, s.anchorOffset), b = this.offsetOf(s.focusNode, s.focusOffset);
     this.lastSel = [Math.min(a, b), Math.max(a, b)];
     return this.lastSel;
   }
   setSel(a, b = a) {
+    if (this.away) { this.lastSel = [a, b]; return; }                  // (focus is on a toolbar control: setting the DOM selection would take it away)
     const s = document.getSelection(), r = document.createRange(), p = this.pointAt(a), q = a === b ? p : this.pointAt(b);
     try { r.setStart(p[0], p[1]); r.setEnd(q[0], q[1]); s.removeAllRanges(); s.addRange(r); } catch { /* ignore */ }
     this.lastSel = [a, b];
@@ -176,14 +193,17 @@ export class RichEditor {
     this.redoStack.length = 0; this.lastPush = now; this.lastType = type;
   }
   /** Apply a function content -> content (formatting, Enter, paste ...) as one undo step and show the result. */
-  edit(fn, selFn = null) {
-    this.pushUndo(true, "op");
+  edit(fn, selFn = null, merge = null) {                              // merge: a key; consecutive edits with the same key (a slider being dragged) are ONE undo step until sealUndo()
+    if (!merge || this.merge !== merge) this.pushUndo(true, "op");
+    this.merge = merge;
     const c = this.getContent(), [a, b] = this.getSel(), r = fn(c, a, b);
     if (!r) return;
     const content = r.content || r, sel = r.sel || (selFn ? selFn(a, b) : [a, b]);
-    this.setContent(content, null, sel); this.pending = null; this.focus(); this.setSel(sel[0], sel[1]);
+    this.setContent(content, null, sel); this.pending = null; this.pendingAt = null;
+    if (!this.away) { this.focus(); this.setSel(sel[0], sel[1]); }
     this.h.onInput && this.h.onInput();
   }
+  sealUndo() { this.merge = null; }
   insert(str) {
     str = String(str).replace(/\r\n?/g, "\n"); if (!str) return;
     this.edit((c, a, b) => ({ content: RT.replaceRange(c, a, b, str, this.pendingStyle(c, a)), sel: [a + str.length, a + str.length] }));
@@ -194,27 +214,35 @@ export class RichEditor {
     const o = { ...st };
     for (const k of ["b", "i", "u"]) if (k in p) { if (p[k]) o[k] = 1; else delete o[k]; }
     if ("z" in p) { if (p.z === null) delete o.z; else o.z = p.z; }
+    if ("c" in p) { if (p.c === null) delete o.c; else o.c = p.c; }
     return o;
   }
   /** Bold / italic / underline: on the selection, or for the text typed next when nothing is selected. */
   toggle(key) {
     const c = this.getContent(), [a, b] = this.getSel();
-    if (a === b) { const cur = this.styleNow(c, a, b)[key] === true; this.pending = { ...(this.pending || {}), [key]: !cur }; this.h.onSelection && this.h.onSelection(); return; }
+    if (a === b) { const cur = this.styleNow(c, a, b)[key] === true; this.setPending({ ...(this.pending || {}), [key]: !cur }); this.h.onSelection && this.h.onSelection(); return; }
     const all = RT.styleOfRange(c, a, b, this.cfg.base)[key] === true;
     this.edit((cc) => RT.applyStyle(cc, a, b, { [key]: !all }));
   }
-  setSize(z) {
+  setSize(z, merge = null) {
     const [a, b] = this.getSel();
-    if (a === b) { this.pending = { ...(this.pending || {}), z }; this.h.onSelection && this.h.onSelection(); return; }
-    this.edit((c) => RT.applyStyle(c, a, b, { z }));
+    if (a === b) { this.setPending({ ...(this.pending || {}), z }); this.h.onSelection && this.h.onSelection(); return; }
+    this.edit((c) => RT.applyStyle(c, a, b, { z }), null, merge);
+  }
+  /** Text colour ("#rrggbb", or null = the box's own colour): the selected text, or the text typed next when nothing is selected. */
+  setColor(col, merge = null) {
+    const [a, b] = this.getSel();
+    if (a === b) { this.setPending({ ...(this.pending || {}), c: col }); this.h.onSelection && this.h.onSelection(); return; }
+    this.edit((c) => RT.applyStyle(c, a, b, { c: col }), null, merge);
   }
   setList(type) { this.edit((c, a, b) => RT.toggleList(c, a, b, type)); }
   /** Style at the caret / of the selection, including what is waiting to be typed. */
   styleNow(c = this.getContent(), a, b) {
     if (a === undefined) [a, b] = this.getSel();
-    const st = RT.styleOfRange(c, a, b, this.cfg.base);
+    const st = RT.styleOfRange(c, a, b, this.cfg.base, this.cfg.color || null);
     if (a === b && this.pending) for (const k of ["b", "i", "u"]) if (k in this.pending) st[k] = this.pending[k];
     if (a === b && this.pending && "z" in this.pending) st.z = this.pending.z ?? this.cfg.base;
+    if (a === b && this.pending && "c" in this.pending) st.c = this.pending.c ?? (this.cfg.color || null);
     const p = RT.paragraphIndexAt(c.text, a); st.list = RT.listAt(c, p);
     return st;
   }
@@ -223,7 +251,7 @@ export class RichEditor {
   step(from, to) {
     if (!from.length) return;
     to.push(this.snapshot()); const s = from.pop();
-    this.setContent(s.content, null, s.sel); this.pending = null; this.lastType = "";
+    this.setContent(s.content, null, s.sel); this.pending = null; this.pendingAt = null; this.lastType = ""; this.merge = null;
     this.h.onInput && this.h.onInput();
   }
 
@@ -260,6 +288,7 @@ export class RichEditor {
     const p = this.pending, patch = {};
     for (const k of ["b", "i", "u"]) if (k in p) patch[k] = !!p[k]; else patch[k] = !!(RT.styleOfChar(c, Math.max(0, a - 1))[k]);
     if ("z" in p) patch.z = p.z;
+    if ("c" in p) patch.c = p.c;
     return patch;
   }
   enter() {

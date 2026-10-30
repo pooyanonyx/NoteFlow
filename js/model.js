@@ -10,7 +10,7 @@
 //   note         {t:"note", x,y,w,h, text, color (paper), size}
 //   text         {t:"text", x,y, text, color, size}   optional: w (box width), dir/align, ruled (true = line pitch and baselines follow the
 //                                                    ruling of lined paper; false = free text placed on lined paper; absent = free / old item),
-//                                                    rp (line pitch of the paper it is ruled on, when not 24), runs / lists (rich text, see richtext.js),
+//                                                    rp (line pitch of the paper it is ruled on, when not 24), runs / lists (rich text: pieces with their own bold / italic / underline / size / colour, see richtext.js),
 //                                                    fl / cont / ns (the box is one piece of text that continues on the next page, see flow.js)
 // Any item may also carry alpha (0..255) and bright (-100..100).
 // Items are never modified in place: an edit creates a new object (cheap undo snapshots).

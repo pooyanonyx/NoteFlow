@@ -300,7 +300,7 @@ function mergeSegs(frags) {                           // neighbouring pieces of 
   const segs = [];
   for (const f of frags) {
     const last = segs[segs.length - 1];
-    if (last && last.size === f.size && last.font === f.font && !!last.st.u === !!f.st.u && last.end === f.start) { last.text += f.text; last.end = f.end; last.w += f.w; }
+    if (last && last.size === f.size && last.font === f.font && !!last.st.u === !!f.st.u && (last.st.c || "") === (f.st.c || "") && last.end === f.start) { last.text += f.text; last.end = f.end; last.w += f.w; }
     else segs.push({ text: f.text, start: f.start, end: f.end, st: f.st, size: f.size, font: f.font, w: f.w });
   }
   return segs;
@@ -533,25 +533,26 @@ export function growBox(d, g, tight = false) {
 export function drawRichText(ctx, d) {
   const L = layoutRich(d), mw = textInnerWidth(d), bw = mw ? mw : L.width, x0 = d.x + TEXT_PAD, fmt = fmtOf(d), fill = M.cssColor(d);
   ctx.textBaseline = "alphabetic"; ctx.fillStyle = fill; if ("textRendering" in ctx) ctx.textRendering = "geometricPrecision";
-  const y0 = d.y + TEXT_PAD;
+  const y0 = d.y + TEXT_PAD, fills = new Map();
+  const fillOf = (st) => { const k = st && st.c; if (!k) return fill; let f = fills.get(k); if (!f) { f = M.cssColor({ ...d, color: k }); fills.set(k, f); } return f; };     // (a piece with its own colour; alpha / brightness stay the box's)
   for (const ln of L.lines) {
     const base = y0 + ln.y + ln.base, rtl = ln.rtl, cl = x0 + (rtl ? 0 : ln.indent), cr = x0 + bw - (rtl ? ln.indent : 0), cw = cr - cl;
     const align = fmt ? fmt.align : (rtl ? "right" : "left");
     if (ln.marker) {
-      ctx.font = ln.marker.font; ctx.direction = rtl ? "rtl" : "ltr"; ctx.textAlign = rtl ? "left" : "right";
+      ctx.fillStyle = fillOf(ln.segs[0] && ln.segs[0].st); ctx.font = ln.marker.font; ctx.direction = rtl ? "rtl" : "ltr"; ctx.textAlign = rtl ? "left" : "right";
       ctx.fillText(ln.marker.text, rtl ? cr + ln.marker.size * 0.4 : cl - ln.marker.size * 0.4, base);
     }
     const W = ln.vis ? ln.visW : ln.w, left = align === "right" ? cr - W : align === "center" ? cl + (cw - W) / 2 : cl;
     if (!ln.vis) {
       const s = ln.segs[0]; if (!s) continue;
       const t = s.draw ?? s.text;
-      ctx.font = s.font; ctx.direction = rtl ? "rtl" : "ltr"; ctx.textAlign = align;
+      ctx.fillStyle = fillOf(s.st); ctx.font = s.font; ctx.direction = rtl ? "rtl" : "ltr"; ctx.textAlign = align;
       ctx.fillText(t, align === "right" ? cr : align === "center" ? cl + cw / 2 : cl, base);
       if (s.st.u) ctx.fillRect(left, base + s.size * 0.12, s.w, Math.max(0.8, s.size * 0.06));
     } else {
       let x = left; ctx.textAlign = "left";
       for (const pc of ln.vis) {
-        ctx.font = pc.seg.font; ctx.direction = pc.level & 1 ? "rtl" : "ltr";
+        ctx.fillStyle = fillOf(pc.seg.st); ctx.font = pc.seg.font; ctx.direction = pc.level & 1 ? "rtl" : "ltr";
         ctx.fillText(pc.text, x, base);
         if (pc.seg.st.u) ctx.fillRect(x, base + pc.seg.size * 0.12, pc.w, Math.max(0.8, pc.seg.size * 0.06));
         x += pc.w;
@@ -606,7 +607,11 @@ export function themed(d, theme) {
   const cache = themedCache[theme], hit = cache && cache.get(d);
   if (hit) return hit;
   const c = adaptHex(d.color, theme), f = d.fill ? adaptHex(d.fill, theme) : d.fill;
-  const out = c === d.color && f === d.fill ? d : { ...d, color: c, ...(f !== undefined ? { fill: f } : {}) };
+  let out = c === d.color && f === d.fill ? d : { ...d, color: c, ...(f !== undefined ? { fill: f } : {}) };
+  if (d.t === "text" && d.runs && d.runs.some((r) => r.c)) {                       // colours chosen inside the text adapt like the box's own colour
+    const runs = d.runs.map((r) => { const a = r.c && adaptHex(r.c, theme); return a && a !== r.c ? { ...r, c: a } : r; });
+    if (runs.some((r, i) => r !== d.runs[i])) out = { ...out, runs };
+  }
   if (cache) cache.set(d, out);
   return out;
 }

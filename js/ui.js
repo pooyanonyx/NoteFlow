@@ -102,7 +102,7 @@ export function toast(msg, ms = 2600) {
 
 // ------------------------------------------------------------------ dialog
 /** Modal dialog. buttons: [{label, value, primary, danger}]. Resolves with the clicked value (null on Esc/backdrop). */
-export function dialog({ title, content, buttons = [{ label: "OK", value: true, primary: true }] }) {
+export function dialog({ title, content, buttons = [{ label: "OK", value: true, primary: true }], keepEdit = false }) {
   return new Promise((resolve) => {
     const prevFocus = document.activeElement;
     const done = (v) => { back.remove(); document.removeEventListener("keydown", onKey, true); prevFocus?.focus?.(); resolve(v); };
@@ -113,6 +113,7 @@ export function dialog({ title, content, buttons = [{ label: "OK", value: true, 
     const box = el("div", { class: "dialog", role: "dialog", "aria-modal": "true" },
       title ? el("h2", {}, title) : null, el("div", { class: "dbody" }, body), el("div", { class: "dbtns" }, btns));
     const back = el("div", { class: "backdrop", onpointerdown: (e) => { if (e.target === back) done(null); } }, box);
+    if (keepEdit) back.dataset.keepEdit = "1";                 // opened from a text box being typed: that text keeps its caret and selection (panel.js onRichBlur)
     document.body.append(back);
     document.addEventListener("keydown", onKey, true);
     (btns.find((b) => b.classList.contains("primary")) || btns[0])?.focus();
@@ -121,12 +122,16 @@ export function dialog({ title, content, buttons = [{ label: "OK", value: true, 
 
 // ------------------------------------------------------------------- popup
 let openPopup = null;
-export function closePopup() { openPopup?.close(); }
+export function closePopup(why) { openPopup?.close(why); }
 /** Show `content` in a floating card next to `anchor`. */
-export function popup(anchor, content, { onClose } = {}) {
-  if (openPopup && openPopup.anchor === anchor) { closePopup(); return null; }   // pressing the same button again closes its popup
+export function popup(anchor, content, { onClose, keepEdit = false } = {}) {
+  if (openPopup && openPopup.anchor === anchor) { closePopup("toggle"); return null; }   // pressing the same button again closes its popup
   closePopup();
   const card = el("div", { class: "popup" }, content);
+  if (keepEdit) {                                              // opened while a text box is typed: pressing it must not take the keyboard from the text (sliders and fields must, they are the exception)
+    card.dataset.keepEdit = "1";
+    for (const ev of ["pointerdown", "mousedown"]) card.addEventListener(ev, (e) => { if (!(e.target.closest && e.target.closest("input, select, textarea"))) e.preventDefault(); });
+  }
   document.body.append(card);
   const place = () => {
     const r = anchor.getBoundingClientRect(), w = card.offsetWidth, h = card.offsetHeight;
@@ -137,16 +142,16 @@ export function popup(anchor, content, { onClose } = {}) {
     card.style.maxHeight = (vh - 16) + "px";
   };
   place();
-  const onDown = (e) => { if (!card.contains(e.target) && !anchor.contains(e.target)) close(); };
-  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); } };   // Escape closes the menu only (the app must not also deselect)
+  const onDown = (e) => { if (!card.contains(e.target) && !anchor.contains(e.target)) close("outside"); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close("escape"); } };   // Escape closes the menu only (the app must not also deselect)
   setTimeout(() => document.addEventListener("pointerdown", onDown, true), 0);
   document.addEventListener("keydown", onKey, true);
-  window.addEventListener("resize", close, { once: true });
-  function close() {
+  window.addEventListener("resize", () => close("resize"), { once: true });
+  function close(why = "action") {
     if (openPopup !== handle) return;
     openPopup = null; card.remove();
     document.removeEventListener("pointerdown", onDown, true); document.removeEventListener("keydown", onKey, true);
-    onClose?.();
+    onClose?.(why);
   }
   const handle = { close, place, card, anchor };
   openPopup = handle;
@@ -173,7 +178,7 @@ export function paletteContent({ recent, onPick, onCustom }) {
 }
 
 /** Custom colour dialog with RGB sliders/numbers and HEX field. Resolves '#rrggbb' or null. */
-export function customColorDialog(initial = "#000000") {
+export function customColorDialog(initial = "#000000", { keepEdit = false } = {}) {
   let rgb = M.parseHex(initial) || [0, 0, 0];
   const preview = el("div", { class: "cprev" });
   const sliders = [], nums = [];
@@ -197,7 +202,7 @@ export function customColorDialog(initial = "#000000") {
   hex.addEventListener("change", () => refresh(true));
   refresh();
   const content = el("div", { class: "cdlg" }, preview, rows, el("div", { class: "crow" }, el("span", {}, "HEX"), hex));
-  return dialog({ title: "Custom color", content, buttons: [{ label: "Cancel", value: null }, { label: "OK", value: "ok", primary: true }] })
+  return dialog({ title: "Custom color", keepEdit, content, buttons: [{ label: "Cancel", value: null }, { label: "OK", value: "ok", primary: true }] })
     .then((v) => (v === "ok" ? M.toHex(...rgb) : null));
 }
 
@@ -245,8 +250,8 @@ export function brushContent({ getStyle, onInput, onCommit, widthEnabled = true,
     resetBtn = el("button", { class: "btn small reset", type: "button", title: resetTitle, "aria-label": "Reset to default", onclick: () => { onReset(); } }, icon("reset"), "Reset to default");
     box.append(el("div", { class: "resetrow" }, resetBtn));
   }
-  const update = (st = getStyle(), widthOn = widthEnabled) => {
-    for (const [key] of BRUSH) { const r = rows[key]; if (!r) continue; r.sl.value = toSlider(key, st[key]); r.val.textContent = r.fmt(+r.sl.value); }
+  const update = (st = getStyle(), widthOn = widthEnabled, skip = null) => {
+    for (const [key] of BRUSH) { const r = rows[key]; if (!r || key === skip) continue; r.sl.value = toSlider(key, st[key]); r.val.textContent = r.fmt(+r.sl.value); }
     rows.width.sl.disabled = !widthOn;
     drawPreview(); refreshReset();
   };

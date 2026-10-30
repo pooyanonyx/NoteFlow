@@ -1,13 +1,15 @@
 // Rich text content model (pure, no DOM). A text box keeps its plain text in `text` (so older versions still read it) plus optional formatting:
-//   runs   [{s: "chars", b?: 1, i?: 1, u?: 1, z?: size}, ...]   the text cut into styled pieces; the pieces joined are exactly `text`
+//   runs   [{s: "chars", b?: 1, i?: 1, u?: 1, z?: size, c?: "#rrggbb"}, ...]   the text cut into styled pieces; the pieces joined are exactly `text`
 //   lists  ["b" | "n" | "", ...]                                 per paragraph (paragraphs are separated by "\n"): bullet / numbered
 // "content" below = {text, runs: array|null, lists: array|null}. Nothing here modifies its arguments.
-const STYLE_KEYS = ["b", "i", "u", "z"];
+const STYLE_KEYS = ["b", "i", "u", "z", "c"];
 export const MAX_RUN_SIZE = 400, MIN_RUN_SIZE = 4;
 const roundZ = (z) => Math.round(Math.min(MAX_RUN_SIZE, Math.max(MIN_RUN_SIZE, z)) * 10) / 10;
-const sameStyle = (a, b) => STYLE_KEYS.every((k) => (a[k] || 0) === (b[k] || 0) && (k !== "z" || a.z === b.z));
-const styleOf = (r) => { const o = {}; if (r.b) o.b = 1; if (r.i) o.i = 1; if (r.u) o.u = 1; if (r.z !== undefined && r.z !== null) o.z = roundZ(+r.z); return o; };
-export const isPlain = (st) => !st || (!st.b && !st.i && !st.u && (st.z === undefined || st.z === null));
+/** A text colour as "#rrggbb" (lower case), or null when it is not one. */
+export const normColor = (v) => { const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(v ?? "").trim()); if (!m) return null; let h = m[1].toLowerCase(); if (h.length === 3) h = [...h].map((x) => x + x).join(""); return "#" + h; };
+const sameStyle = (a, b) => STYLE_KEYS.every((k) => (k === "z" ? a.z === b.z : (a[k] || 0) === (b[k] || 0)));
+const styleOf = (r) => { const o = {}; if (r.b) o.b = 1; if (r.i) o.i = 1; if (r.u) o.u = 1; if (r.z !== undefined && r.z !== null) o.z = roundZ(+r.z); const c = normColor(r.c); if (c) o.c = c; return o; };
+export const isPlain = (st) => !st || (!st.b && !st.i && !st.u && (st.z === undefined || st.z === null) && !normColor(st.c));
 
 /** Validate runs against the text. Returns merged clean runs, or null when there is no formatting (or the runs do not match the text). */
 export function cleanRuns(runs, text) {
@@ -82,18 +84,20 @@ export function concat(c1, c2, joined = false) {
   }
   return makeContent(text, runs, lists);
 }
-/** Style of the text [a, b): each key is true / false, or null when mixed; z = the size, or null when mixed / not set. A collapsed range uses the character before it. */
-export function styleOfRange(c, a, b, baseSize = null) {
+/** Style of the text [a, b): each key is true / false, or null when mixed; z = the size, c = the colour (baseColor where none is set), or null when mixed. A collapsed range uses the character before it. */
+export function styleOfRange(c, a, b, baseSize = null, baseColor = null) {
   if (a === b) a = Math.max(0, a - 1), b = Math.min(c.text.length, a + 1);
   const sp = spans(c).filter((r) => r.start < b && r.end > a);
-  const res = { b: false, i: false, u: false, z: baseSize };
+  const res = { b: false, i: false, u: false, z: baseSize, c: baseColor };
   if (!sp.length) return res;
   for (const k of ["b", "i", "u"]) { const all = sp.every((r) => r[k]), none = sp.every((r) => !r[k]); res[k] = all ? true : none ? false : null; }
   const zs = new Set(sp.map((r) => (r.z === undefined ? baseSize : r.z)));
   res.z = zs.size === 1 ? [...zs][0] : null;
+  const cs = new Set(sp.map((r) => r.c || baseColor));                       // (colour: the box's colour where no run colour is set; null when mixed)
+  res.c = cs.size === 1 ? [...cs][0] : null;
   return res;
 }
-/** Apply style changes to [a, b). patch: {b?: bool, i?: bool, u?: bool, z?: number | null (null = back to the box size)}. */
+/** Apply style changes to [a, b). patch: {b?: bool, i?: bool, u?: bool, z?: number | null (null = back to the box size), c?: "#rrggbb" | null (null = back to the box colour)}. */
 export function applyStyle(c, a, b, patch) {
   if (a >= b) return c;
   const out = [];
@@ -104,6 +108,7 @@ export function applyStyle(c, a, b, patch) {
     const n = { ...st };
     for (const k of ["b", "i", "u"]) if (k in patch) { if (patch[k]) n[k] = 1; else delete n[k]; }
     if ("z" in patch) { if (patch.z === null || patch.z === undefined) delete n.z; else n.z = roundZ(patch.z); }
+    if ("c" in patch) { const col = normColor(patch.c); if (col) n.c = col; else delete n.c; }
     out.push({ ...n, s: r.s.slice(s - r.start, e - r.start) });
     if (e < r.end) out.push({ ...st, s: r.s.slice(e - r.start) });
   }

@@ -188,9 +188,9 @@ export class Panel {
     this.fillBtn = el("button", { class: "btn tool fillbtn", type: "button", "aria-label": "Fill", "aria-pressed": "false", disabled: true,
       title: "Fill closed shapes with the colour", onclick: () => this.toggleFill() }, icon("fill"), el("span", { class: "lbl" }, "Fill"));
     toolBar.append(this.fillBtn);
-    this.colorBtn = el("button", { class: "btn", type: "button", title: "Choose a colour", onclick: () => this.openColor() },
+    this.colorBtn = el("button", { class: "btn", type: "button", title: "Choose a colour (the selected text, or the text you type next)", dataset: { keepEdit: "1" }, onclick: () => this.openColor() },
       el("span", { class: "cdot" }), el("span", { class: "lbl" }, "Color"), icon("chevdown", "tiny"));
-    this.brushBtn = el("button", { class: "btn", type: "button", title: "Thickness, opacity, brightness, text size", onclick: () => this.openBrush() },
+    this.brushBtn = el("button", { class: "btn", type: "button", title: "Thickness, opacity, brightness, text size", dataset: { keepEdit: "1" }, onclick: () => this.openBrush() },
       icon("brush"), el("span", { class: "lbl" }, "Brush"), icon("chevdown", "tiny"));
     const fb = (ic, title, fn) => el("button", { class: "btn tool fmt", type: "button", title, "aria-label": title, "aria-pressed": "false", onclick: fn }, icon(ic));
     this.fmtBtns = {
@@ -213,7 +213,9 @@ export class Panel {
     this.richGroup = el("span", { class: "richgrp" }, el("span", { class: "fsep" }), RB.b, RB.i, RB.u, el("span", { class: "fsep" }), RB.ul, RB.ol, el("span", { class: "fsep" }), RB.smaller, this.sizeLbl, RB.bigger);
     this.fmtGroup = el("span", { class: "fmtgrp", role: "group", "aria-label": "Text format", hidden: true },
       F.ltr, F.rtl, el("span", { class: "fsep" }), F.left, F.center, F.right, this.snapSep, this.snapBtn, this.richGroup);
+    this.fmtGroup.dataset.keepEdit = "1";
     for (const ev of ["pointerdown", "mousedown"]) this.fmtGroup.addEventListener(ev, (e) => e.preventDefault());   // keep the text cursor in the editor
+    for (const b of [this.colorBtn, this.brushBtn]) for (const ev of ["pointerdown", "mousedown"]) b.addEventListener(ev, (e) => { if (this.richEditing()) e.preventDefault(); });   // (same for Colour / Brush while a text box is typed)
     this.buildMindGroup();
     toolBar.append(this.fmtGroup, this.mindGroup, el("span", { class: "gap" }), this.colorBtn, this.brushBtn);
 
@@ -224,7 +226,8 @@ export class Panel {
     this.ta = el("textarea", { class: "editor", hidden: true, rows: 1, dir: "auto", spellcheck: false, autocapitalize: "off",
       oninput: () => this.positionEditor(), onblur: () => this.finishEdit(),
       onkeydown: (e) => this.onEditorKey(e) });
-    this.rt = new RichEditor({ onInput: () => this.onRichInput(), onSelection: () => this.onRichSel(), onKey: (e) => this.onRichKey(e), onBlur: () => this.finishEdit() });
+    this.rt = new RichEditor({ onInput: () => this.onRichInput(), onSelection: () => this.onRichSel(), onKey: (e) => this.onRichKey(e), onBlur: (e) => this.onRichBlur(e) });
+    this.guardFn = (e) => this.editGuard(e);
     this.msg = el("div", { class: "msg" });
     this.stage = el("div", { class: "stage", tabIndex: -1 }, this.canvas, this.ta, this.rt.el, this.msg);
     this.stage.addEventListener("scroll", () => { if (this.stage.scrollLeft || this.stage.scrollTop) { this.stage.scrollLeft = 0; this.stage.scrollTop = 0; } });   // (the view is moved by the app only, never by the browser)
@@ -268,7 +271,13 @@ export class Panel {
     if (!silent) this.render();
   }
   groupKey() { return GROUP_OF_TOOL[this.tool] || null; }
-  updateColorDot() { this.colorBtn.querySelector(".cdot").style.background = this.curStyle.color; }
+  updateColorDot() { this.colorBtn.querySelector(".cdot").style.background = this.dotColor(); }
+  /** The colour the Colour button shows: while a text box is typed, the colour of the text at the caret (or of what is typed next). */
+  dotColor() {
+    if (this.richEditing()) { const c = this.richState().c; if (c) return c; }
+    return this.curStyle.color;
+  }
+  richEditing() { return !!this.editing && !!this.editing.rich; }
 
   applyStyle(key, value, commit = true) {
     this.curStyle[key] = value;
@@ -284,6 +293,7 @@ export class Panel {
         let n = { ...d, [field]: v };
         if (key === "color" && d.fill) n.fill = v;                  // a filled shape stays filled with its colour
         if (key === "size" && d.t === "text" && d.runs) n = F.withContent(n, RT.applyAll(RT.contentOf(d), { z: null }));   // one size for the whole box again
+        if (key === "color" && d.t === "text" && d.runs) n = F.withContent(n, RT.applyAll(RT.contentOf(n), { c: null }));  // and one colour
         if (key === "size" && d.t === "text" && d.ruled === true) n = R.ruledNormalize(n);
         if (key === "size") n = this.fitGrown(n);
         if (JSON.stringify(n) !== JSON.stringify(d)) {
@@ -298,20 +308,72 @@ export class Panel {
     this.recent = [hex, ...this.recent.filter((c) => c !== hex)].slice(0, 10);
   }
   openColor() {
-    this.finishEdit();
-    const pick = (hex) => { closePopup(); this.rememberColor(hex); this.applyStyle("color", hex); };
+    const rich = this.richEditing();
+    if (!rich) this.finishEdit();                                       // (a text box being typed stays open: the colour goes to the selected text / the text typed next)
+    const pick = (hex) => { closePopup(); this.rememberColor(hex); if (this.richEditing()) this.setTextColor(hex); else this.applyStyle("color", hex); };
+    const start = this.dotColor();
     popup(this.colorBtn, paletteContent({ recent: this.recent, onPick: pick,
-      onCustom: async () => { closePopup(); const hex = await customColorDialog(this.curStyle.color); if (hex) pick(hex); } }));
+      onCustom: async () => {
+        const keep = this.richEditing(); if (keep) this.rt.away = true;       // the dialog takes the keyboard; the text keeps its caret / selection
+        closePopup(); const hex = await customColorDialog(start, { keepEdit: keep });
+        if (hex) pick(hex); else this.resumeEdit();
+      } }), { keepEdit: rich, onClose: (why) => { if (why !== "outside" && why !== "action") this.resumeEdit(); } });
+  }
+  /** Colour for the selected text, or for the text typed next (no selection). Takes effect at once and the caret stays where it is. */
+  setTextColor(hex) {
+    const ed = this.editing; if (!ed || !ed.rich) return;
+    const base = this.editedItem().color, same = RT.normColor(hex) === RT.normColor(base);
+    this.rt.setColor(same ? null : hex);                                  // (the box's own colour is "no colour of its own": it still follows the box)
+    this.rt.sealUndo(); this.rstateKey = ""; this.updateColorDot(); this.resumeEdit();
+  }
+  /** After a toolbar control (popup, slider, dialog) is done: the keyboard goes back to the text, at the same place. */
+  resumeEdit() {
+    const ed = this.editing;
+    if (ed && ed.rich && this.rt.away) { this.rt.resume(); this.rstateKey = ""; this.fmtKey = ""; this.updateFmtUi(); this.render(); }
+  }
+  /** The text editor lost the keyboard: to a control of the toolbar / its popups that is made for use while typing (the text stays open, caret and selection are kept), else the box is finished as always. */
+  onRichBlur(e) {
+    const to = e && e.relatedTarget;
+    if (this.richEditing() && to && to.closest && to.closest("[data-keep-edit]")) { this.rt.away = true; return; }
+    this.finishEdit();
+  }
+  /** Pressing anywhere else while the keyboard is on a toolbar control ends the edit (as leaving a text box always did); the page / the text itself and the controls above handle their own presses. */
+  editGuard(e) {
+    if (!this.richEditing() || !this.rt.away) return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest("[data-keep-edit]")) { if (!t.closest(".popup, .backdrop")) this.resumeEdit(); return; }       // (a button made for use while typing: the keyboard is the text's again at once)
+    if (this.rt.el.contains(t) || this.stage.contains(t)) return;
+    this.finishEdit();
   }
   openBrush() {
-    this.finishEdit();
+    const rich = this.richEditing();
+    if (!rich) this.finishEdit();
     const g = GROUP_OF_TOOL[this.tool], tool = this.tool;
-    const box = brushContent({ getStyle: () => this.curStyle, widthEnabled: this.tool !== "hltext", eraser: this.tool === "eraser",
-      onInput: (k, v) => this.applyStyle(k, v, false), onCommit: (k, v) => this.applyStyle(k, v, true),
+    const box = brushContent({ getStyle: () => this.brushStyle(), widthEnabled: this.tool !== "hltext", eraser: this.tool === "eraser",
+      onInput: (k, v) => this.brushSet(k, v, false), onCommit: (k, v) => this.brushSet(k, v, true),
       ...(g ? { onReset: () => this.resetTool(tool), isDefault: () => this.isToolDefault(tool),
         resetTitle: `Restore the ${T.GROUP_LABEL[g]} settings (colour, thickness, opacity, brightness, text size${g === "text" ? ", bold / italic / underline / list" : g === "shape" ? ", shape, fill" : g === "mind" ? ", connectors, nodes, fill" : ""}) to their defaults. Other tools are not changed.` } : {}) });
     this.brushBox = box;
-    popup(this.brushBtn, box, { onClose: () => { if (this.brushBox === box) this.brushBox = null; } });
+    popup(this.brushBtn, box, { keepEdit: rich, onClose: (why) => { if (this.brushBox === box) this.brushBox = null; if (why !== "outside") this.resumeEdit(); } });
+  }
+  /** What the Brush sliders show: while a text box is typed, the size at the caret / of the selection and the box's opacity / brightness. */
+  brushStyle() {
+    if (!this.richEditing()) return this.curStyle;
+    const d = this.editedItem(), rs = this.richState();
+    return { ...this.curStyle, size: rs.z ?? d.size, alpha: M.itemAlpha(d), bright: M.itemBright(d) };
+  }
+  /** A Brush slider moved (commit = released). While a text box is typed: the size goes to the selected text / the text typed next, opacity and brightness to the whole box;
+   *  the keyboard may be on the slider, the text keeps its caret and selection, and one drag is one undo step. */
+  brushSet(key, value, commit) {
+    const ed = this.editing;
+    if (!ed || !ed.rich) { this.applyStyle(key, value, commit); return; }
+    if (key === "size") { this.rt.setSize(Number(value), "brush-size"); this.rstateKey = ""; }
+    else {
+      this.curStyle[key] = value; const g = this.groupKey(); if (g) this.groups[g][key] = value;           // (the tool's setting too, as always)
+      if (key === "alpha" || key === "bright") { ed.look = { ...(ed.look || {}), [key]: value }; this.syncLive(); this.render(); }
+    }
+    if (commit) { this.rt.sealUndo(); this.resumeEdit(); }
   }
   // ------------------------------------------------------------ reset to default
   toolDefaultsNow() { return T.toolDefaults(this.kind, this.boardIsDark()); }
@@ -333,7 +395,10 @@ export class Panel {
     if (g === "shape") { this.shapeKind = T.EXTRAS_DEFAULT.shape.shapeKind; this.fill.shape = T.EXTRAS_DEFAULT.shape.fill; this.updateShapeBtn(); }
     if (g === "mind") { const e = T.EXTRAS_DEFAULT.mind; this.connStyle = e.connStyle; this.connArrow = e.connArrow; this.nodeKind = e.nodeKind; this.fill.mind = e.fill; }
     this.fillKey = ""; this.mindKey = ""; this.fmtKey = ""; this.updateColorDot();
-    if (this.brushBox) this.brushBox.update(this.curStyle, this.tool !== "hltext");
+    if (this.richEditing() && GROUP_OF_TOOL[this.tool] === g) {          // a box is being typed: its opacity / brightness go back too, and what was set for the next typed text is dropped
+      this.editing.look = { alpha: this.groups[g].alpha, bright: this.groups[g].bright }; this.rt.pending = null; this.rstateKey = ""; this.syncLive();
+    }
+    if (this.brushBox) this.brushBox.update(this.brushStyle(), this.tool !== "hltext");
     this.render();
     toast(`${T.GROUP_LABEL[g]} reset to default.`);
     return true;
@@ -1561,7 +1626,7 @@ export class Panel {
     const show = !!this.textTarget() || this.tool === "text" || this.tool === "note";
     const f = show ? this.displayFmt() : null, snapShow = show && this.snapApplies(), snapOn = snapShow && this.snapDisplay();
     const rs = show ? this.richState() : null, tx = this.textTarget();
-    const key = f ? f.dir + "|" + f.align + "|" + (snapShow ? (snapOn ? "S1" : "S0") : "-") + "|" + (rs ? [rs.b, rs.i, rs.u, rs.list, rs.z].join(",") : "-") + "|" + (tx && tx.t === "text" ? "T" : "") : "";
+    const key = f ? f.dir + "|" + f.align + "|" + (snapShow ? (snapOn ? "S1" : "S0") : "-") + "|" + (rs ? [rs.b, rs.i, rs.u, rs.list, rs.z, rs.c].join(",") : "-") + "|" + (tx && tx.t === "text" ? "T" : "") : "";
     if (key === this.fmtKey) return;
     this.fmtKey = key; this.fmtGroup.hidden = !show;
     if (!f) return;
@@ -1682,7 +1747,7 @@ export class Panel {
     if (!ed) return null;
     const base = ed.idx !== null ? this.items[ed.idx] : ed.proto;
     if (!base || base.t !== "text") return base;
-    const key = [base, ed.fmt, ed.ruled, ed.auto, ed.content, ed.grow, this.cur, this.pagePitch()], m = ed.memo;       // (one object per state: its layout is computed once)
+    const key = [base, ed.fmt, ed.ruled, ed.auto, ed.content, ed.grow, ed.look, this.cur, this.pagePitch()], m = ed.memo;       // (one object per state: its layout is computed once)
     if (m && m.key.every((v, i) => v === key[i])) return m.d;
     let d = this.withEditState(base, ed);
     if (ed.content) d = F.withContent(d, ed.content);
@@ -1713,6 +1778,7 @@ export class Panel {
   fitGrown(d) { return d && d.t === "text" && d.g && R.fmtOf(d) ? R.growBox(d, this.growFor(d), true) : d; }
   withEditState(base, ed) {
     let d = ed.fmt ? { ...base, ...ed.fmt } : base;
+    if (ed.look) d = { ...d, ...ed.look };                                   // opacity / brightness chosen while typing
     const want = ed.ruled !== undefined ? ed.ruled : (base.ruled === undefined && ed.auto ? true : base.ruled);
     if (want === true) d = R.ruledNormalize(this.withPitch({ ...d, ruled: true }));
     else if (want === false && d.ruled !== false) d = { ...d, ruled: false };
@@ -1740,10 +1806,11 @@ export class Panel {
       let c = RT.contentOf(d);
       if (fresh && ts.list) c = RT.makeContent(c.text, null, [ts.list]);                     // a new box starts as the list the Text tool is set to
       this.editing.content = c;
+      document.addEventListener("pointerdown", this.guardFn, true);
       this.rt.show(); this.rt.setContent(c, this.richCfg(this.editedItem()));
       this.positionEditor(); this.syncLive(); this.render();
       this.rt.focus(); this.rt.setSel(c.text.length, c.text.length); this.caretReset();
-      if (fresh && (ts.b || ts.i || ts.u)) this.rt.pending = { ...(ts.b ? { b: true } : {}), ...(ts.i ? { i: true } : {}), ...(ts.u ? { u: true } : {}) };    // what is typed first is bold / italic / underlined
+      if (fresh && (ts.b || ts.i || ts.u)) this.rt.setPending({ ...(ts.b ? { b: true } : {}), ...(ts.i ? { i: true } : {}), ...(ts.u ? { u: true } : {}) });    // what is typed first is bold / italic / underlined
       this.fmtKey = ""; this.rstateKey = "";
       return;
     }
@@ -1756,7 +1823,7 @@ export class Panel {
     this.ta.setSelectionRange(this.ta.value.length, this.ta.value.length);
   }
   // ---- rich text editing: the page canvas draws the live text, the editor element is only the (invisible) input layer on top of it
-  richCfg(d) { return { base: d.size, s: this.view.scale, ruled: d.ruled === true, pitch: d.rp || M.RULE_PITCH, fmt: (this.editing && this.editing.fmt) || R.fmtOf(d), indent: R.listIndent(d.size), wraps: this.wrapsFor(d) }; }
+  richCfg(d) { return { base: d.size, color: d.color, s: this.view.scale, ruled: d.ruled === true, pitch: d.rp || M.RULE_PITCH, fmt: (this.editing && this.editing.fmt) || R.fmtOf(d), indent: R.listIndent(d.size), wraps: this.wrapsFor(d) }; }
   /** Width and offset (css px) of every paragraph of the invisible editor: the middle of the range of widths that breaks it into the canvas' lines (see R.paragraphWraps), anchored on the side the text is aligned to. */
   wrapsFor(d) {
     const mw = R.textInnerWidth(d); if (!mw || d.t !== "text") return null;
@@ -1797,7 +1864,12 @@ export class Panel {
     const dx = sx < 0 ? sx - m : sx > w ? sx - (w - m) : 0, dy = sy < 0 ? sy - m : sy2 > h ? sy2 - (h - m) : 0;        // (only when the caret has really left the screen; then it is brought back with a margin)
     if (dx || dy) this.scrollViewBy(dx, dy);
   }
-  onRichSel() { if (this.editing && this.editing.rich) { this.rstateKey = ""; this.fmtKey = ""; this.updateFmtUi(); this.caretReset(); this.render(); } }
+  onRichSel() {
+    if (this.editing && this.editing.rich) {
+      this.rstateKey = ""; this.fmtKey = ""; this.updateFmtUi(); this.updateColorDot(); this.caretReset(); this.render();
+      if (this.brushBox) this.brushBox.update(this.brushStyle(), this.tool !== "hltext", this.rt.away ? "size" : null);    // (the slider being dragged is left alone)
+    }
+  }
   onRichKey(e) {
     e.stopPropagation();
     if (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) { e.preventDefault(); this.finishEdit(); return true; }
@@ -1847,7 +1919,7 @@ export class Panel {
     const loc = F.locate(r.pieces, off + caret), it = this.pages[loc.piece.pi].items[loc.piece.idx];
     if (loc.piece.pi !== this.cur) { const hadCur = this.cur; this.setCur(loc.piece.pi); this.vp = loc.piece.pi; void hadCur; }
     ed.idx = loc.piece.idx; ed.proto = null; ed.content = RT.contentOf(it);
-    this.rt.setContent(ed.content, this.richCfg(this.editedItem()), [loc.local, loc.local]); this.rt.focus(); this.rt.setSel(loc.local, loc.local);
+    this.rt.setContent(ed.content, this.richCfg(this.editedItem()), [loc.local, loc.local]); if (!this.rt.away) this.rt.focus(); this.rt.setSel(loc.local, loc.local);
     if (!this.pageVisible(this.cur)) this.scrollToPage(this.cur);
     this.ui();
     return true;
@@ -1922,11 +1994,12 @@ export class Panel {
     ed.content = this.rt.getContent();
     let d = this.editedItem(); const pi = this.cur, old = ed.idx !== null ? this.items[ed.idx] : null, empty = !ed.content.text.trim();
     if (d && ed.grow) d = R.growBox(d, ed.grow, true);                                        // the box is saved exactly as wide as its text
+    document.removeEventListener("pointerdown", this.guardFn, true);
     this.editing = null; this.editingItem = null; this.rt.hide(); this.caretStop();
-    this.live = null; this.preview = null;
+    this.live = null; this.preview = null; this.updateColorDot();
     const g = GROUP_OF_TOOL[this.tool]; if (g && this.tool !== "select") this.curStyle = { ...this.groups[g] };      // (the caret's size / colour was only shown, not chosen)
     const sameC = old && JSON.stringify([ed.content.text, ed.content.runs, ed.content.lists]) === JSON.stringify([old.text, old.runs || null, old.lists || null]);
-    const fmtSame = !ed.fmt || (ed.fmt.dir === old.dir && ed.fmt.align === old.align);
+    const fmtSame = (!ed.fmt || (ed.fmt.dir === old.dir && ed.fmt.align === old.align)) && (!ed.look || !old || (M.itemAlpha({ ...old, ...ed.look }) === M.itemAlpha(old) && M.itemBright({ ...old, ...ed.look }) === M.itemBright(old)));
     if (old && !ed.base && sameC && fmtSame && ed.ruled === undefined && !empty) { this.render(); return; }          // opened and closed without a change: the box is left exactly as it was
     if (this.kind !== "nb" || (empty && !(old && old.fl))) {
       if (empty) { if (old) { const items = this.items.slice(); items.splice(ed.idx, 1); this.commit(items); } else this.render(); return; }

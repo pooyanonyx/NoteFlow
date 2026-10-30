@@ -20,7 +20,7 @@ There is nothing to install and no account to create. Open NoteFlow in your brow
 - **One workspace instead of five apps.** PDF, notebook and board live together. Arrange them the way you like.
 - **Mark up PDFs the way you would on paper.** Highlight text, scribble in the margins, add sticky notes and drop in shapes, then save the annotated PDF.
 - **Notes that grow with you.** A notebook that expands page by page: blank, lined, grid, dotted, weekly planner and Cornell-notes paper, with adjustable line spacing and margins. Long text flows onto the next page by itself, like in a word processor.
-- **Formatted text.** Bold, italic, underline, different sizes inside one text box, bulleted and numbered lists.
+- **Formatted text.** Bold, italic, underline, different sizes and colours inside one text box, bulleted and numbered lists. Change any of them while you type, from the toolbar, the Color button or the Brush sliders: the text stays open, the caret stays where it was, and only the selected text (or what you type next) changes.
 - **A board for big ideas.** A white board or a blackboard for sketches, diagrams and brainstorming.
 - **Mind maps in seconds.** Build a map from the keyboard, or draw links with your finger or pen.
 - **Write in Persian and English.** Mix both in the same note, with full control over direction and alignment. Right-to-left notebooks put the red margin (or the Cornell cue column) on the right and use Persian day names and a Saturday week start in the planner.
