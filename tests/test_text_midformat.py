@@ -72,6 +72,13 @@ with sync_playwright() as pw:
     kb.press("Home"); kb.type("X")
     C.check("a colour chosen for the next text is dropped when the caret moves elsewhere", runs(a) == [{"s": "Xone two"}] or a.ev(STATE)["c"]["runs"] is None, runs(a))
     a.finish()
+    # the same, without any help from event timing: the caret moves and the next text arrives in the SAME task (selectionchange cannot have fired yet; on a slow / busy machine that is what a fast typist looks like)
+    a.click_page(100, 335); kb.type("one two"); pick(8)
+    a.ev("() => { const p = noteflow.panels.nb; p.rt.setSel(0, 0); document.execCommand('insertText', false, 'X'); }"); a.page.wait_for_timeout(150)
+    C.check("a colour chosen for the next text does not apply after the caret moved, even when the next key comes at once", a.ev(STATE)["c"]["runs"] is None, runs(a))
+    kb.press("End"); kb.type("Y")
+    C.check("…and the pending state is gone for good", a.ev(STATE)["c"]["runs"] is None and a.ev(STATE)["pending"] is None, runs(a))
+    a.finish()
 
     # ---- 5. Brush popup: slider drag keeps the text; size from there on; one undo step; opacity for the box
     a.click_page(100, 380); kb.type("Size "); s0 = a.ev(STATE)["sel"]

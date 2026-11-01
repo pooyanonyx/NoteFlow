@@ -12,7 +12,7 @@
 //                                                    ruling of lined paper; false = free text placed on lined paper; absent = free / old item),
 //                                                    rp (line pitch of the paper it is ruled on, when not 24), runs / lists (rich text: pieces with their own bold / italic / underline / size / colour, see richtext.js),
 //                                                    fl / cont / ns (the box is one piece of text that continues on the next page, see flow.js)
-// Any item may also carry alpha (0..255) and bright (-100..100).
+// Any item may also carry alpha (0..255) and bright (-100..100), and id (the item's stable name, made when something links to it; nodes always have one).
 // Items are never modified in place: an edit creates a new object (cheap undo snapshots).
 
 import * as RT from "./richtext.js";
@@ -66,6 +66,9 @@ export const BOARD_FORMAT = "DualNote-board", BOARD_W = 4000.0, BOARD_H = 3000.0
 export const BOARD_BGS = ["white", "black"];                  // page.paper of a board; page.grid = dotted grid on/off
 export const NODE_KINDS = ["round", "ellipse", "rect"], CONN_STYLES = ["curve", "line", "elbow"];
 export const NODE_PAD = 10, NODE_MIN_W = 90, NODE_MIN_H = 44, NODE_MAX_W = 260, NODE_GAP_X = 90, NODE_GAP_Y = 24;
+/** The item's stable id; made when the first link to it is made. The one place where an item is changed in place: the id adds nothing visible, and the older
+ *  versions of the page kept for undo share this very object, so they carry the id too (a link never loses its item by undoing). */
+export function ensureId(d) { if (!d.id) d.id = "i" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4); return d.id; }
 export const newId = () => "n" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3);
 export const nodeIndex = (items) => { const m = new Map(); for (const d of items) if (d.t === "node" && d.id) m.set(d.id, d); return m; };
 export const hasConns = (items) => items.some((d) => d.t === "conn");
@@ -221,6 +224,7 @@ export function sanitizeStyle(d, dflt) {
 
 // ------------------------------------------------------------- validation
 function addExtras(d, out) {
+  if (out.t !== "node" && out.t !== "conn" && typeof d.id === "string" && d.id) out.id = d.id.slice(0, 40);        // id: a stable name for the item, given when something links to it (see ensureId); optional, older files / apps never have it
   for (const [k, lo, hi] of [["alpha", 0, 255], ["bright", -100, 100]]) {
     if (k in d) { try { out[k] = clamp(pyRound(num(d[k])), lo, hi); } catch { /* ignore bad optional value */ } }
   }
@@ -415,7 +419,7 @@ export function erasePen(d, a, b, r) {
   }
   if (cur) pieces.push(cur);
   if (!touched) return null;
-  return pieces.filter((pc) => pc.length >= 2 && polyLen(pc) >= 0.4).map((pc) => ({ ...d, pts: pc }));
+  return pieces.filter((pc) => pc.length >= 2 && polyLen(pc) >= 0.4).map((pc, k) => { const o = { ...d, pts: pc }; if (k) delete o.id; return o; });     // (the pieces of an erased stroke: only the first keeps the item's id)
 }
 
 /** Corner points of a t:"shape" item in page coordinates. */

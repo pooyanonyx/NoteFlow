@@ -34,6 +34,8 @@ const ICONS = {
   triangle: P("M12 4l9 16H3z"), diamond: P("M12 3l9 9-9 9-9-9z"), pentagon: P("M12 3l8.5 6.2-3.2 10.3H6.7L3.5 9.2z"),
   hexagon: P("M3 12l4.5-8h9L21 12l-4.5 8h-9z"), star: P("M12 3l2.7 5.8 6.3.8-4.6 4.4 1.2 6.3L12 17.2 6.4 20.3l1.2-6.3L3 9.6l6.3-.8z"),
   node: '<rect x="3" y="7" width="18" height="10" rx="4"/>' + P("M8 12h8"),
+  chain: P("M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1") + P("M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"),
+  search: '<circle cx="11" cy="11" r="6.5"/>' + P("M16 16l5 5"),
   link: '<circle cx="6" cy="17" r="3"/><circle cx="18" cy="7" r="3"/>' + P("M8.2 14.8l7.6-5.6"),
   sun: '<circle cx="12" cy="12" r="4"/>' + P("M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"),
   moon: P("M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"),
@@ -102,7 +104,7 @@ export function toast(msg, ms = 2600) {
 
 // ------------------------------------------------------------------ dialog
 /** Modal dialog. buttons: [{label, value, primary, danger}]. Resolves with the clicked value (null on Esc/backdrop). */
-export function dialog({ title, content, buttons = [{ label: "OK", value: true, primary: true }], keepEdit = false }) {
+export function dialog({ title, content, buttons = [{ label: "OK", value: true, primary: true }], keepEdit = false, ref = null }) {
   return new Promise((resolve) => {
     const prevFocus = document.activeElement;
     const done = (v) => { back.remove(); document.removeEventListener("keydown", onKey, true); prevFocus?.focus?.(); resolve(v); };
@@ -113,6 +115,7 @@ export function dialog({ title, content, buttons = [{ label: "OK", value: true, 
     const box = el("div", { class: "dialog", role: "dialog", "aria-modal": "true" },
       title ? el("h2", {}, title) : null, el("div", { class: "dbody" }, body), el("div", { class: "dbtns" }, btns));
     const back = el("div", { class: "backdrop", onpointerdown: (e) => { if (e.target === back) done(null); } }, box);
+    if (ref) ref.close = (v = null) => done(v);                  // (lets the caller close the dialog itself, e.g. after "go there")
     if (keepEdit) back.dataset.keepEdit = "1";                 // opened from a text box being typed: that text keeps its caret and selection (panel.js onRichBlur)
     document.body.append(back);
     document.addEventListener("keydown", onKey, true);

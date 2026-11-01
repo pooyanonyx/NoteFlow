@@ -4,6 +4,8 @@ import * as K from "./keys.js";
 import { initTouchTips } from "./tips.js";
 import * as WS from "./workspace.js";
 import { Panel } from "./panel.js";
+import { LinkController } from "./linkui.js";
+import { SearchUI } from "./searchui.js";
 import { setImageLoadedCallback, bumpFontEpoch } from "./render.js";
 import { el, icon, toast, dialog, popup, closePopup } from "./ui.js";
 
@@ -38,6 +40,7 @@ export class App {
   constructor(root) {
     this.root = root;
     this.order = [...M.DEFAULT_LAYOUT]; this.viewMode = "both"; this.tab = 0; this.active = null;
+    this.idb = idb; this.links = new LinkController(this);                 // (before the panels: they draw the link marks)
     this.panels = { pdf: new Panel(this, "pdf", "pdf", "PDF"), pdf2: new Panel(this, "pdf2", "pdf", "PDF 2"),
       nb: new Panel(this, "nb", "nb", "Notebook"), nb2: new Panel(this, "nb2", "nb", "Notebook 2"),
       board: new Panel(this, "board", "board", "Board"), board2: new Panel(this, "board2", "board", "Board 2") };
@@ -48,6 +51,7 @@ export class App {
     document.fonts?.addEventListener?.("loadingdone", () => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); });         // text is measured again with the real font
     document.fonts?.load?.('16px Vazirmatn', "\u067e\u0686\u0698\u06af").then(() => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); }).catch(() => {});   // pictures that finish decoding appear at once
     this.buildDom();
+    this.search = new SearchUI(this);
     this.refreshLayout();
     window.addEventListener("resize", () => this.refreshLayout());
     window.addEventListener("beforeunload", (e) => { this.flushAutosave(); if (this.anyDirty() && !this.autosaveOk) { e.preventDefault(); e.returnValue = ""; } });
@@ -79,6 +83,8 @@ export class App {
       b("open", "Open workspace", "Open a workspace file (.dnws)", () => this.wsOpenInput.click()),
       b("save", "Save workspace", "Save everything (PDF, annotations, notebooks) in one file (" + K.MOD + "+S)", () => this.saveWorkspace()),
       b("plus", "New", "Start a new empty workspace", () => this.newWorkspace()),
+      b("search", "Search", "Search everywhere: notebooks, PDFs, boards (" + K.MOD + "+Shift+F)", () => this.search.toggle()),
+      b("chain", "Links", "All links between notes and PDFs", () => this.links.manage()),
       el("span", { class: "gap" }), this.layoutBtn, this.switchBtn, this.seg, this.installBtn,
       b("menu", "", "Help", () => this.help(), "icon-only"), this.wsOpenInput);
     this.main = el("main", { class: "main" });
@@ -273,10 +279,11 @@ export class App {
     const t = e.target, p = this.active, mod = e.ctrlKey || e.metaKey, key = K.keyName(e);
     if (document.querySelector(".backdrop")) return;                            // a dialog is open: it owns the keyboard (it handles its own Escape)
     if (mod && !e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveWorkspace(); return; }
+    if (mod && !e.altKey && e.shiftKey && key === "f") { e.preventDefault(); this.search.toggle(); return; }
     if (K.isTextField(t)) return;                                               // typing: Space, letters, Ctrl+Z (text undo) ... are the browser's
     if (K.isFocusedControl(t) && (key === " " || key === "Enter")) return;      // a keyboard-focused button: Enter / Space activate it
     if (document.querySelector(".popup") && key !== "Escape") return;           // an open menu: no shortcuts behind it
-    if (key === "Escape") { closePopup(); p?.deselect(); return; }
+    if (key === "Escape") { if (this.links.picking) { this.links.cancel(); return; } closePopup(); p?.deselect(); return; }
     if (e.altKey && !mod && /^[1-9]$/.test(key)) { e.preventDefault(); this.focusPanel(+key - 1); return; }
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); p?.goto(p.shown() - 1); return; }
     if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); p?.goto(p.shown() + 1); return; }
@@ -322,7 +329,21 @@ export class App {
   // ----------------------------------------------------------- workspace
   onChange(panel, info = {}) {
     if (info.clean) panel.ui();
+    this.links.touch(); this.search.contentChanged();
     this.scheduleAutosave();
+  }
+  /** A document was opened / closed (a PDF): links and search look at it again. */
+  docsChanged() { this.links.touch(); this.links.renderAll(); this.search.contentChanged(); if (this.search.open) this.search.watchPdfs(); }
+  /** Make sure the panel can be seen (a link or a search result lives there): it is added to the layout when the layout does not have it, and on a narrow screen its tab is opened. */
+  async revealPanel(key, from = null) {
+    if (!this.order.includes(key)) {
+      const order = [...this.order];
+      if (order.length < M.MAX_PANELS) order.push(key);
+      else { let i = order.length - 1; if (from && order[i] === from.key) i--; order[Math.max(0, i)] = key; }
+      await this.setLayout(order, false);
+      await new Promise((r) => requestAnimationFrame(r));                    // (the panel gets its size)
+    }
+    if (this.narrow) { const i = this.order.indexOf(key); if (i >= 0 && this.tab !== i) this.setTab(i); }
   }
   isPristine(p) { return !p.dirty && !p.name && p.pages.length === 1 && !p.items.length; }
   settings() {
@@ -339,7 +360,7 @@ export class App {
       notebook2: !lite && (this.order.includes("nb2") || (all && !this.isPristine(P.nb2))) ? this.nbPages(P.nb2) : null,
       board: inc("board") ? P.board.boardData() : null,
       board2: this.order.includes("board2") || (all && !this.isPristine(P.board2)) ? P.board2.boardData() : null,
-      settings: this.settings(), type: M.workspaceTypeOf(this.order) || "custom" };
+      settings: this.settings(), type: M.workspaceTypeOf(this.order) || "custom", links: this.links.store.toJSON() };
   }
   async saveWorkspace() {
     const busy = this.busy("Saving workspace…");
@@ -380,6 +401,7 @@ export class App {
   /** Rebuild all four panels from workspace data (validated by readWorkspace). */
   async restore(ws) {
     const P = this.panels, st = ws.settings || {}, win = st.window && typeof st.window === "object" ? st.window : {};
+    this.links.cancel(); this.links.store.load(ws.links || null);                  // (a workspace without links has none: links never leak from the one that was open before)
     const pdfs = [["pdf", ws.pdf, st.pdf], ["pdf2", ws.pdf2, st.pdf2]];
     for (const [key, data, view] of pdfs) {
       const p = P[key];
@@ -419,7 +441,7 @@ export class App {
     // collecting the data closes any open text editor: never do that in the middle of typing (wait until the user is done)
     if (!force && Object.values(this.panels).some((p) => p.editing)) { this.scheduleAutosave(); return; }
     try {
-      const d = this.collect({ all: true, lite: true }), rec = { version: 2, saved: Date.now(), settings: d.settings, board: d.board, board2: d.board2 };
+      const d = this.collect({ all: true, lite: true }), rec = { version: 2, saved: Date.now(), settings: d.settings, board: d.board, board2: d.board2, links: d.links };
       const used = new Set(), fresh = [];
       const ref = (items) => { const id = this.partId(items); used.add(id); if (!this._written.has(id)) fresh.push([id, items]); return id; };
       const nb = (key) => { const p = this.panels[key]; p.finishEdit(); return p.pages.map((q) => ({ ...M.pageMeta(q), part: ref(q.items) })); };
@@ -430,7 +452,7 @@ export class App {
         if (!p) { rec[key] = null; continue; }
         const panel = this.panels[key].pdf;
         panel.hash = panel.hash || await WS.sha256Hex(p.source);
-        const k = "pdf:" + panel.hash; keep.add(k);
+        const k = "pdf:" + panel.hash; keep.add(k); keep.add("ptxt:" + panel.hash);
         if (!(await idb.get(k))) await idb.set(k, p.source);
         rec[key] = { name: p.name, hash: panel.hash, parts: p.pages.map((items) => ref(items)) };
       }
@@ -438,7 +460,7 @@ export class App {
       await idb.set("session", rec);                                   // (written last: it only ever points at parts that exist)
       for (const k of await idb.keys()) {
         const s = String(k);
-        if (s.startsWith("pdf:") && !keep.has(k)) await idb.del(k);
+        if ((s.startsWith("pdf:") || s.startsWith("ptxt:")) && !keep.has(k)) await idb.del(k);          // (ptxt: = the text of a PDF, kept for search)
         else if (s.startsWith("pg:") && !used.has(s)) { await idb.del(k); this._written.delete(s); }
       }
       this.autosaveOk = true;
@@ -454,7 +476,7 @@ export class App {
         for (const key of ["pdf", "pdf2"]) if (rec[key]) { rec[key].pages = await Promise.all(rec[key].parts.map((id) => idb.get(id))); if (rec[key].pages.some((x) => !Array.isArray(x))) throw new Error("backup page missing"); }
       }
       const bd = (b) => (b ? M.parseBoard(M.boardToJson(b)) : null);       // sanitised copy
-      const ws = { settings: rec.settings || {}, board: bd(rec.board), board2: bd(rec.board2), notebook: M.parseNotebook(M.notebookToJson(rec.notebook)), notebook2: rec.notebook2 ? M.parseNotebook(M.notebookToJson(rec.notebook2)) : null, pdf: null, pdf2: null };
+      const ws = { links: rec.links || null, settings: rec.settings || {}, board: bd(rec.board), board2: bd(rec.board2), notebook: M.parseNotebook(M.notebookToJson(rec.notebook)), notebook2: rec.notebook2 ? M.parseNotebook(M.notebookToJson(rec.notebook2)) : null, pdf: null, pdf2: null };
       for (const key of ["pdf", "pdf2"]) {
         const r = rec[key]; if (!r) continue;
         const source = await idb.get("pdf:" + r.hash);

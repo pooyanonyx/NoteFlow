@@ -42,6 +42,11 @@ export class RichEditor {
   }
   hasFocus() { return document.activeElement === this.el; }
   setPending(p) { this.pending = p; this.pendingAt = this.getSel()[0]; }
+  /** The style chosen for the text typed next, but only while the caret is still where it was chosen. Checked when it is USED, never left to a later selectionchange event (that one fires after the next key). */
+  livePending(at) {
+    if (this.pending && this.pendingAt !== null && this.pendingAt !== at) { this.pending = null; this.pendingAt = null; }
+    return this.pending;
+  }
 
   // ------------------------------------------------------------ content <-> DOM
   /** Replace what is shown by `content`. cfg: {base, s, ruled, pitch, fmt, indent}. sel = [a, b] puts the caret there. */
@@ -209,7 +214,7 @@ export class RichEditor {
     this.edit((c, a, b) => ({ content: RT.replaceRange(c, a, b, str, this.pendingStyle(c, a)), sel: [a + str.length, a + str.length] }));
   }
   pendingStyle(c, a) {
-    const st = a > 0 ? RT.styleOfChar(c, a - 1) : {}, p = this.pending;
+    const st = a > 0 ? RT.styleOfChar(c, a - 1) : {}, p = this.livePending(a);
     if (!p) return st;
     const o = { ...st };
     for (const k of ["b", "i", "u"]) if (k in p) { if (p[k]) o[k] = 1; else delete o[k]; }
@@ -240,9 +245,10 @@ export class RichEditor {
   styleNow(c = this.getContent(), a, b) {
     if (a === undefined) [a, b] = this.getSel();
     const st = RT.styleOfRange(c, a, b, this.cfg.base, this.cfg.color || null);
-    if (a === b && this.pending) for (const k of ["b", "i", "u"]) if (k in this.pending) st[k] = this.pending[k];
-    if (a === b && this.pending && "z" in this.pending) st.z = this.pending.z ?? this.cfg.base;
-    if (a === b && this.pending && "c" in this.pending) st.c = this.pending.c ?? (this.cfg.color || null);
+    const pend = a === b ? this.livePending(a) : null;
+    if (pend) for (const k of ["b", "i", "u"]) if (k in pend) st[k] = pend[k];
+    if (pend && "z" in pend) st.z = pend.z ?? this.cfg.base;
+    if (pend && "c" in pend) st.c = pend.c ?? (this.cfg.color || null);
     const p = RT.paragraphIndexAt(c.text, a); st.list = RT.listAt(c, p);
     return st;
   }
@@ -266,7 +272,7 @@ export class RichEditor {
     this.goalX = null;
     if (this.composing && e.isComposing !== false) { this.h.onInput && this.h.onInput(); return; }
     let sel = null;
-    const typed = e && e.inputType === "insertText" && this.pending && e.data;
+    const typed = !!(e && e.inputType === "insertText" && this.pending && e.data && this.livePending(Math.max(0, this.getSel()[0] - e.data.length)));
     if (typed || !this.canonical()) {
       let c = this.getContent(); sel = this.getSel();
       if (typed) { const n = e.data.length, a = Math.max(0, sel[0] - n); c = RT.applyStyle(c, a, sel[0], this.stPatch(c, a)); this.pending = null; }

@@ -1,7 +1,7 @@
 // NoteFlow workspace file (.dnws): the whole session in ONE file - a ZIP archive with the same layout
 // as the Windows app writes, so workspaces open in both apps:
 //   manifest.json, settings.json, notebook.json, [notebook2.json], [board.json, board2.json],
-//   pdf/original.pdf + pdf/annotations.json, [pdf2/...]
+//   pdf/original.pdf + pdf/annotations.json, [pdf2/...], [links.json] (linked notes, see links.js; older files and apps do not have it)
 import * as M from "./model.js";
 
 export const WORKSPACE_FORMAT = "DualNote-workspace";
@@ -20,7 +20,7 @@ async function pdfInfo(p) {
 }
 
 /** pdf/pdf2: null or {name, source: Uint8Array, pages: [[item,...],...]}; notebooks: [{paper, items}] ; returns a Blob. */
-export async function writeWorkspace({ pdf = null, pdf2 = null, notebook = null, notebook2 = null, board = null, board2 = null, settings = {}, type = null }) {
+export async function writeWorkspace({ pdf = null, pdf2 = null, notebook = null, notebook2 = null, board = null, board2 = null, settings = {}, type = null, links = null }) {
   const JSZip = globalThis.JSZip;
   const manifest = {
     format: WORKSPACE_FORMAT, version: WORKSPACE_VERSION, app: "NoteFlow (web)",
@@ -37,6 +37,7 @@ export async function writeWorkspace({ pdf = null, pdf2 = null, notebook = null,
   if (notebook2) zip.file("notebook2.json", M.notebookToJson(notebook2));
   if (board) zip.file("board.json", M.boardToJson(board));                  // boards: one file each, only for the panels the workspace has
   if (board2) zip.file("board2.json", M.boardToJson(board2));
+  if (links && links.links && links.links.length) zip.file("links.json", JSON.stringify(links));                    // (only when there are links)
   for (const [prefix, p] of [["pdf", pdf], ["pdf2", pdf2]]) {
     if (!p) continue;
     zip.file(`${prefix}/original.pdf`, toBytes(p.source), { compression: "STORE" });   // PDFs are already compressed
@@ -85,5 +86,7 @@ export async function readWorkspace(data) {
   };
   const pdf = manifest.pdf != null ? await loadPdf("pdf", manifest.pdf) : null;
   const pdf2 = manifest.pdf2 != null ? await loadPdf("pdf2", manifest.pdf2) : null;
-  return { manifest, settings, notebook, notebook2, board, board2, pdf, pdf2, type };
+  let links = null;                                                                          // damaged link data never stops a workspace from opening
+  try { const f = zip.file("links.json"); if (f) links = JSON.parse(await f.async("string")); } catch { links = null; }
+  return { manifest, settings, notebook, notebook2, board, board2, pdf, pdf2, type, links };
 }

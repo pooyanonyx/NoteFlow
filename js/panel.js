@@ -9,6 +9,8 @@ import * as T from "./tools.js";
 import * as RT from "./richtext.js";
 import * as F from "./flow.js";
 import { RichEditor } from "./editor.js";
+import { sha256Hex } from "./workspace.js";
+import { PdfTextStore } from "./pdftext.js";
 import { el, icon, toast, dialog, popup, closePopup, paletteContent, customColorDialog, brushContent, paperContent } from "./ui.js";
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -64,6 +66,7 @@ export class Panel {
     this.snapLines = true;                                          // text written on lined paper follows the printed rules (see render.js "writing on ruled paper")
     this.shapeKind = "rect"; this.fill = { shape: false, mind: false }; this.textStyle = { ...T.EXTRAS_DEFAULT.text }; this.fillKey = "";  // Shapes tool: active shape + Fill switch (Shapes and Mind map keep their own)
     this._bc = new WeakMap(); this.eraserPos = null;
+    this.marks = []; this.markTimer = 0; this.linkHits = []; this.pickPrev = null;      // highlights placed on pages (search result, "you are here" after a link), the pressable link marks, the area being picked
     this.connStyle = "curve"; this.connArrow = true; this.nodeKind = "round"; this.mindKey = ""; this.linkTarget = null; this._nm = null;   // mind map defaults
     if (kind === "nb") { this.layout(); this.view.ty = 14; }
     if (kind === "board") this.layout();
@@ -135,7 +138,8 @@ export class Panel {
     this.hactions.prepend(this.b.undo, this.b.redo);
     this.b.paste = b("paste", "Paste", "Paste an image (e.g. a screenshot) or text", () => this.app.pasteButton(this));
     this.b.image = b("image", "Image", "Insert an image from a file or the camera", () => this.imgInput.click());
-    fileBar.append(el("span", { class: "gap" }), this.b.paste, this.b.image);
+    this.b.link = this.linkBtn = b("chain", "Link", "Link a note, text or drawing with a PDF page, region or passage (and back)", () => this.app.links.start(this));
+    fileBar.append(el("span", { class: "gap" }), this.b.paste, this.b.image, this.b.link);
 
     const pageBar = mk("bar");
     this.b.prev = b("prev", "", "Previous page", () => this.goto(this.cur - 1));
@@ -471,6 +475,39 @@ export class Panel {
   screenToPage(sx, sy) { const [ox, oy] = this.origin(), v = this.view; return { x: (sx - v.tx) / v.scale - ox, y: (sy - v.ty) / v.scale - oy }; }
   clampP(p) { const [w, h] = this.pageDims(); return { x: clamp(p.x, 0, w), y: clamp(p.y, 0, h) }; }
 
+  /** Screen position (inside the panel) of a point of page i (not only the current page). */
+  pageToScreenAt(i, x, y) { const v = this.view, w = this.sizeOf(i)[0]; return [v.tx + ((this.docW - w) / 2 + x) * v.scale, v.ty + ((this.offs ? this.offs[i] : 0) + y) * v.scale]; }
+  /** The y (page points) of page i that is just below the floating toolbars: things that must stay reachable are put there. */
+  belowBars(i) { const bars = this.root.querySelector(".bars"), v = this.view, bh = bars ? bars.offsetHeight : 0; return (bh + 10 - (v.ty + (this.offs ? this.offs[i] : 0) * v.scale)) / v.scale; }
+  /** Put a highlight on a page: rects in page points. kind "search" stays until replaced / cleared, "flash" goes away after ms. */
+  async showLocation(i, rects, { kind = "flash", ms = 0, top = false } = {}) {
+    if (!this.hasPage || !this.offs || !rects.length) return;
+    this.clearMarks(kind);
+    this.marks.push({ page: i, rects, kind, until: ms ? performance.now() + ms : 0 });
+    if (!top) this.revealRect(i, [Math.min(...rects.map((r) => r[0])), Math.min(...rects.map((r) => r[1])), Math.max(...rects.map((r) => r[2])), Math.max(...rects.map((r) => r[3]))]);
+    this.render();
+    if (ms) { clearTimeout(this.markTimer); this.markTimer = setTimeout(() => { this.marks = this.marks.filter((m) => !m.until || m.until > performance.now()); this.render(); }, ms + 60); }
+  }
+  clearMarks(kind = null) { const n = this.marks.length; this.marks = kind ? this.marks.filter((m) => m.kind !== kind) : []; if (n !== this.marks.length) this.render(); }
+  /** Scroll / pan so that the rectangle [x0, y0, x1, y1] of page i is on screen (nothing moves when it already is). */
+  revealRect(i, [x0, y0, x1, y1]) {
+    if (this.kind === "board" && this.view.scale < 0.3) { this.view.scale = 0.5; this.view.fit = false; }
+    const [ax, ay] = this.pageToScreenAt(i, x0, y0), [bx, by] = this.pageToScreenAt(i, x1, y1), m = 36;
+    const outX = ax < m || bx > this.cw - m, outY = ay < m || by > this.ch - m;
+    if (!outX && !outY) return;
+    if (outX) { this.view.tx += this.cw / 2 - (ax + bx) / 2; this.view.fit = false; }
+    if (outY) this.view.ty += (this.kind === "board" ? this.ch / 2 : this.ch * 0.38) - (ay + by) / 2;
+    this.clampView(); this.positionEditor(); this.scheduleRaster(); this.render();
+  }
+  drawMarks(ctx, i) {
+    const s = this.view.scale, pp = this.pickPrev && this.pickPrev.page === i ? [{ kind: "pick", rects: this.pickPrev.rects }] : [];
+    for (const m of [...this.marks.filter((q) => q.page === i), ...pp]) {
+      const st = { search: ["rgba(255,193,7,.50)", "#f9a825"], flash: ["rgba(0,137,123,.22)", "#00897b"], pick: ["rgba(25,118,210,.28)", "#1976d2"] }[m.kind] || ["rgba(255,193,7,.4)", "#f9a825"];
+      ctx.fillStyle = st[0]; ctx.strokeStyle = st[1]; ctx.lineWidth = 2 / s;
+      for (const r of m.rects) { ctx.fillRect(r[0], r[1], r[2] - r[0], r[3] - r[1]); if (m.kind !== "search") ctx.strokeRect(r[0], r[1], r[2] - r[0], r[3] - r[1]); }
+    }
+  }
+
   // ------------------------------------------- continuous PDF: layout of all pages
   // Every page has a slot in one tall column, so scrolling is smooth and page numbers are exact.
   // Page sizes are read lazily (20 at a time, a few pages before they are needed); until then a page
@@ -714,6 +751,7 @@ export class Panel {
     if (!this.offs) return;
     this.syncVp();
     const v = this.view, s = v.scale, [lo, hi] = this.visibleRange();
+    this.linkHits = [];
     ctx.save();
     ctx.translate(v.tx, v.ty); ctx.scale(s, s);
     for (let i = lo; i <= hi; i++) {
@@ -745,6 +783,8 @@ export class Panel {
         if (isCur && this.linkTarget && o.nodes) { const n = o.nodes.get(this.linkTarget); if (n) { ctx.strokeStyle = "#1976d2"; ctx.lineWidth = 3; ctx.setLineDash([6, 4]); ctx.strokeRect(Math.min(n.x1, n.x2) - 5, Math.min(n.y1, n.y2) - 5, Math.abs(n.x2 - n.x1) + 10, Math.abs(n.y2 - n.y1) + 10); } }
         ctx.restore();
       }
+      this.drawMarks(ctx, i);
+      this.app.links.draw(this, ctx, i, w, h);
       if (isCur && this.editing && this.editing.rich) this.drawRichCaret(ctx);
       if (isCur && this.selected !== null && list[this.selected]) this.drawSelection(ctx, list[this.selected]);
       ctx.restore();
@@ -991,6 +1031,9 @@ export class Panel {
     if (this.pointers.size > 2) return;
     if (e.pointerType === "touch" && performance.now() - this.lastPen < 1200) { this.action = { type: "palm" }; return; }   // palm rejection while a pen is in use
     closePopup();
+    const LK = this.app.links;
+    if (LK.picking) { if (LK.down(this, e, l)) return; }                                          // making a link: this press chooses an end
+    else if ((this.tool === "select" || this.tool === "pan" || e.ctrlKey || e.metaKey) && LK.press(this, l, e)) { this.action = { type: "none" }; return; }   // a press on a link mark goes to the other end
     this.toolDown(e, l);
   }
   onMove(e) {
@@ -1073,6 +1116,7 @@ export class Panel {
   toolMove(e, l, evs) {
     const a = this.action;
     if (a.type === "palm" || a.type === "none") return;
+    if (a.type === "pick") { this.app.links.move(this, e, l); return; }
     if (a.type === "pan") {
       this.view.tx += l.x - a.last.x; this.view.ty += l.y - a.last.y; a.last = l;
       if (!this.continuous()) this.view.fit = false;
@@ -1117,6 +1161,7 @@ export class Panel {
   toolUp(e, l) {
     const a = this.action; this.action = null;
     if (a.type === "palm" || a.type === "none") return;
+    if (a.type === "pick") { this.action = a; this.app.links.up(this, e); return; }
     const p = this.toPage(e);
     if (a.type === "pan") {
       if (a.tap) this.tapSelect(null, l);
@@ -2170,21 +2215,25 @@ export class Panel {
     if (workspace && pages.length !== doc.numPages) { await doc.destroy(); toast("The PDF annotations do not match the embedded PDF."); return false; }
     this.finishEdit();
     this.resetDoc();
-    if (this.pdf) { try { await this.pdf.doc.destroy(); } catch { /* ignore */ } }
-    this.pdf = { doc, source }; this.name = name;
+    if (this.pdf) { this.pdf.text && this.pdf.text.stop(); try { await this.pdf.doc.destroy(); } catch { /* ignore */ } }
+    this.pdf = { doc, source, hash: null, text: null }; this.name = name;
+    try { this.pdf.hash = await sha256Hex(source); } catch { /* no identity (insecure page): this PDF cannot be linked */ }       // (the PDF's identity for links; also used by the session backup)
+    this.pdf.text = new PdfTextStore(doc, this.pdf.hash, this.app.idb);
     this.pages = (pages || Array.from({ length: doc.numPages }, () => [])).map((items) => ({ items: items.slice() }));
     this.refitNodes();
     this.history.clear(); this.dirty = false; this.cur = 0;
     await this.showPage(0);
     this.app.onChange(this, { clean: true });
+    this.app.docsChanged();
     return true;
   }
   clearPdf() {
     this.finishEdit(); this.resetDoc();
-    if (this.pdf) this.pdf.doc.destroy().catch(() => {});
+    if (this.pdf) { this.pdf.text && this.pdf.text.stop(); this.pdf.doc.destroy().catch(() => {}); }
     this.pdf = null; this.name = null; this.pages = []; this.cur = 0;
     this.history.clear(); this.dirty = false; this.selected = null;
     this.ui(); this.render();
+    this.app.docsChanged();
   }
   async saveAnnotated() {
     if (!this.pdf) { toast("Open a PDF first."); return false; }
