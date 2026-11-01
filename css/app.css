@@ -176,20 +176,42 @@ select.paper { max-width:150px; }
 .fmtgrp, .richgrp { flex-wrap:wrap; row-gap:2px; max-width:100%; }     /* narrow screens: the text format buttons wrap instead of running off the screen */
 
 /* ---- linked notes: the banner while a link is made, the list of links, search ---- */
-.linkbanner { position:fixed; z-index:60; left:50%; top:max(52px, calc(env(safe-area-inset-top) + 46px)); transform:translateX(-50%); display:flex; align-items:center; gap:10px; max-width:min(720px, calc(100vw - 16px));
-  background:#00695c; color:#fff; padding:8px 10px 8px 14px; border-radius:12px; box-shadow:0 6px 22px rgba(0,0,0,.35); font-size:13px; }
-.linkbanner .btn { background:rgba(255,255,255,.16); color:#fff; border-color:transparent; flex:none; }
-.linkbanner .msg { min-width:0; }
+.linkguide { position:fixed; z-index:60; left:50%; bottom:max(64px, calc(env(safe-area-inset-bottom) + 56px)); transform:translateX(-50%); box-sizing:border-box; width:min(620px, calc(100vw - 20px));
+  background:#fff; color:#1f2937; border:2px solid #00897b; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35); padding:10px 12px 12px; display:flex; flex-direction:column; gap:8px; }
+.linkguide[hidden] { display:none; }
+.lghead { display:flex; align-items:center; gap:8px; color:#00695c; }
+.lghead b { font-size:14px; } .lgstep { color:var(--muted); font-size:12px; margin-inline-end:auto; }
+.lgchips { display:flex; align-items:stretch; gap:8px; }
+.lgchips .larrow { align-self:center; font-size:18px; }
+.lchip { flex:1 1 0; min-width:0; display:flex; align-items:center; gap:8px; text-align:start; font:inherit; padding:7px 9px; border-radius:10px; border:1.5px dashed #b6c0cc; background:#f8fafc; color:#64748b; cursor:default; }
+.lchip.now { border-color:#00897b; background:#e6f4f1; color:#0f4f46; }
+.lchip.done { border-style:solid; border-color:#00897b; background:#e6f4f1; color:#1f2937; cursor:pointer; }
+.lchip:disabled { opacity:1; }
+.lnum { flex:none; width:22px; height:22px; border-radius:50%; background:#cbd5e1; color:#fff; display:grid; place-items:center; font-size:12px; font-weight:700; }
+.lchip.now .lnum, .lchip.done .lnum { background:#00897b; }
+.lchip .ltxt { display:flex; flex-direction:column; min-width:0; }
+.lkind { font-size:11px; text-transform:none; color:#64748b; } .lchip .lph { font-weight:600; }
+.lchip .ltitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+.lghint { font-size:13px; line-height:1.4; color:#334155; }
+.lcount { background:#00897b; color:#fff; border-radius:9px; font-size:11px; padding:0 6px; margin-inline-start:4px; line-height:16px; }
+.bars .btn.linkbtn .lbl { display:inline; }
+.lintro { margin:0 0 10px; color:#475569; font-size:13px; line-height:1.45; }
+.lempty { border:1px dashed var(--line); border-radius:12px; padding:12px 14px; background:#f8fafc; }
+.lbig { margin:0 0 6px; font-weight:700; font-size:15px; }
+.lsteps { margin:0; padding-inline-start:20px; display:flex; flex-direction:column; gap:6px; font-size:13px; line-height:1.4; }
+.lgroup { font-size:12px; font-weight:700; color:#475569; margin:4px 2px 0; } .lgroup.warn { color:#b34700; }
+.linkmanager { max-height:min(60vh, 520px); overflow:auto; }
 .panel.linkpick .stage { cursor:crosshair; }
 .panel.linkpick .stage canvas { outline:2px dashed #00897b; outline-offset:-3px; }
-.linkmenu, .linkmanager { min-width:min(360px, 86vw); }
+.linkmenu { min-width:min(360px, 86vw); }
+.dialog:has(.linkmanager) { width:min(660px, 100%); }                      /* the list of links needs room for both ends of a link side by side */
 .lhead { font-weight:600; padding:2px 4px 6px; color:var(--muted); font-size:12px; }
 .linklist { display:flex; flex-direction:column; gap:6px; }
 .lrow { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:10px; padding:4px; }
 .lrow.bad { border-color:#ef6c00; background:#fff8f0; }
 .lrow .lgo { flex:1 1 0; min-width:0; display:flex; align-items:center; gap:8px; border:0; background:transparent; padding:6px; font:inherit; text-align:start; cursor:pointer; border-radius:8px; color:inherit; }
 .lrow .lgo:hover { background:#f1f5f9; }
-.lrow .ltxt { display:flex; flex-direction:column; min-width:0; }
+.lrow .ltxt { display:flex; flex-direction:column; min-width:0; } .lrow .lkind { font-size:11px; color:#64748b; }
 .lrow .ltitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
 .lrow .lwhere { font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .lrow.bad .lwhere { color:#b34700; white-space:normal; }

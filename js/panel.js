@@ -138,7 +138,7 @@ export class Panel {
     this.hactions.prepend(this.b.undo, this.b.redo);
     this.b.paste = b("paste", "Paste", "Paste an image (e.g. a screenshot) or text", () => this.app.pasteButton(this));
     this.b.image = b("image", "Image", "Insert an image from a file or the camera", () => this.imgInput.click());
-    this.b.link = this.linkBtn = b("chain", "Link", "Link a note, text or drawing with a PDF page, region or passage (and back)", () => this.app.links.start(this));
+    this.b.link = this.linkBtn = b("chain", "Link", "Link a note, text box or drawing with a PDF page, region or text (and back). Select the note first, or just press Link.", () => this.app.links.start(this), "linkbtn");
     fileBar.append(el("span", { class: "gap" }), this.b.paste, this.b.image, this.b.link);
 
     const pageBar = mk("bar");

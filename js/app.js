@@ -52,6 +52,9 @@ export class App {
     document.fonts?.load?.('16px Vazirmatn', "\u067e\u0686\u0698\u06af").then(() => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); }).catch(() => {});   // pictures that finish decoding appear at once
     this.buildDom();
     this.search = new SearchUI(this);
+    this.linksCount = el("span", { class: "lcount", hidden: true }); this.linksBtn.append(this.linksCount);          // (how many links there are)
+    const upd = () => { const n = this.links.store.size; this.linksCount.textContent = String(n); this.linksCount.hidden = !n; };
+    this.links.store.onChange(upd); upd();
     this.refreshLayout();
     window.addEventListener("resize", () => this.refreshLayout());
     window.addEventListener("beforeunload", (e) => { this.flushAutosave(); if (this.anyDirty() && !this.autosaveOk) { e.preventDefault(); e.returnValue = ""; } });
@@ -84,7 +87,7 @@ export class App {
       b("save", "Save workspace", "Save everything (PDF, annotations, notebooks) in one file (" + K.MOD + "+S)", () => this.saveWorkspace()),
       b("plus", "New", "Start a new empty workspace", () => this.newWorkspace()),
       b("search", "Search", "Search everywhere: notebooks, PDFs, boards (" + K.MOD + "+Shift+F)", () => this.search.toggle()),
-      b("chain", "Links", "All links between notes and PDFs", () => this.links.manage()),
+      this.linksBtn = b("chain", "Links", "All links between notes and PDFs: see, open or remove them", () => this.links.manage()),
       el("span", { class: "gap" }), this.layoutBtn, this.switchBtn, this.seg, this.installBtn,
       b("menu", "", "Help", () => this.help(), "icon-only"), this.wsOpenInput);
     this.main = el("main", { class: "main" });

@@ -21,11 +21,17 @@ export function itemPreview(d) {
   return { pen: "Drawing", mark: "Marker", hl: "Highlight", image: "Image", rect: "Rectangle", ellipse: "Ellipse", line: "Line", arrow: "Arrow", shape: "Shape" }[d.t] || "Item";
 }
 
+/** What kind of thing an item is, in words ("Text box", "Drawing" ...). */
+export function itemKind(d) {
+  if (!d) return "Item";
+  return { text: "Text box", note: "Note", node: "Mind map node", pen: "Drawing", mark: "Marker", hl: "Highlight", image: "Image", rect: "Shape", ellipse: "Shape", line: "Shape", arrow: "Shape", shape: "Shape" }[d.t] || "Item";
+}
+
 export class LinkController {
   constructor(app) {
     this.app = app; this.store = new LinkStore(); this.pick = null; this.rev = 0; this.cache = new Map(); this.cacheRev = -1;
-    this.banner = el("div", { class: "linkbanner", hidden: true, role: "status" });
-    app.root.append(this.banner);
+    this.guide = el("div", { class: "linkguide", hidden: true, role: "region", "aria-label": "Making a link" });
+    app.root.append(this.guide);
     this.store.onChange(() => { this.rev++; this.renderAll(); });
   }
   /** Something that links can depend on changed (content edited, a PDF opened ...). */
@@ -66,11 +72,13 @@ export class LinkController {
     if (a.page >= p.pages.length) return { state: "pdf-page", panel: p, why: "That page does not exist in the PDF." };
     return { state: "ok", panel: p, page: a.page };
   }
+  /** "Text box", "Note", "PDF page", "PDF region", "PDF text" ... */
+  kindOf(a) { if (a.k === "item") { const r = this.resolve(a); return r.item ? itemKind(r.item) : "Item"; } return { page: "PDF page", region: "PDF region", text: "PDF text" }[anchorShape(a)]; }
   describe(a) {
     const r = this.resolve(a);
     if (a.k === "item") return { title: r.item ? itemPreview(r.item) : a.pv || "Item", where: r.state === "ok" ? `${r.panel.label} · page ${r.page + 1}` : r.why, ok: r.state === "ok", icon: "note" };
-    const shape = anchorShape(a), what = shape === "text" ? `“${clean(a.quote.text, 60)}”` : shape === "region" ? "marked region" : "page";
-    return { title: `${a.name || "PDF"} · p. ${a.page + 1} · ${what}`, where: r.state === "ok" ? "" : r.why, ok: r.state === "ok", icon: "pdf" };
+    const shape = anchorShape(a), what = shape === "text" ? `“${clean(a.quote.text, 60)}”` : shape === "region" ? "region" : "";
+    return { title: [a.name || "PDF", `p. ${a.page + 1}`, what].filter(Boolean).join(" · "), where: r.state === "ok" ? "" : r.why, ok: r.state === "ok", icon: "pdf" };
   }
 
   // ------------------------------------------------------------ going to an anchor
@@ -135,31 +143,56 @@ export class LinkController {
   begin(a) {
     this.pick = { a }; this.say();
     for (const p of Object.values(this.app.panels)) { p.root.classList.add("linkpick"); if (p.tool !== "pan") p.cancelAction?.(); }
+    if (a && a.k === "item") this.showPdfFor();
     if (this.app.active) this.app.active.render();
   }
+  /** After a note was chosen first, the other end is a PDF place: if a PDF is open but not on screen, bring it back. */
+  async showPdfFor() {
+    const shown = this.app.order.some((k) => { const p = this.app.panels[k]; return p && p.kind === "pdf" && p.pdf; });
+    if (shown) return;
+    const hidden = PANELS.find((k) => { const p = this.app.panels[k]; return p && p.kind === "pdf" && p.pdf; });
+    if (hidden) { await this.app.revealPanel(hidden, this.app.active); this.say(); }
+  }
+  /** The guide card: the two ends chosen so far and, in one sentence, what to do next. */
   say() {
     const k = this.pick;
-    this.banner.hidden = !k; if (!k) return;
-    this.banner.replaceChildren(icon("chain"),
-      el("span", { class: "msg" }, k.a ? el("span", {}, "Linking ", el("b", {}, `“${this.describe(k.a).title}”`), ". Now choose the other end: ") : "Choose the first end: ",
-        "tap an item, or in a PDF tap a page, drag a region, or drag across text."),
-      el("button", { class: "btn small", type: "button", onclick: () => this.cancel() }, "Cancel"));
+    this.guide.hidden = !k; if (!k) return;
+    const a = k.a, step = a ? 2 : 1;
+    const pdfOpen = Object.values(this.app.panels).some((p) => p.kind === "pdf" && p.pdf);
+    const chip = (n, an, hint) => {
+      const done = !!an, now = step === n;
+      return el("button", { class: "lchip" + (done ? " done" : "") + (now ? " now" : ""), type: "button", disabled: !done || n !== 1, title: done && n === 1 ? "Click to choose a different first end" : "",
+        onclick: () => { if (n === 1 && done) { this.pick.a = null; this.say(); } } },
+        el("span", { class: "lnum" }, done ? "✓" : String(n)),
+        done ? el("span", { class: "ltxt" }, el("span", { class: "lkind" }, (n === 1 ? "From · " : "To · ") + this.kindOf(an)), el("span", { class: "ltitle" }, this.describe(an).title))
+          : el("span", { class: "ltxt" }, el("span", { class: "lkind" }, n === 1 ? "From" : "To"), el("span", { class: "lph" }, hint)));
+    };
+    let hint;
+    if (!a) hint = "Choose the first end. Tap a note, text box or drawing — or, in a PDF, tap a page, drag a box around a region, or drag across text.";
+    else if (a.k === "pdf") hint = "Now choose the other end: tap the note, text box or drawing that should be linked to this PDF place.";
+    else if (!pdfOpen) hint = "Now choose what it points to. No PDF is open yet: open one (Open PDF), then tap a page.";
+    else hint = "Now choose what it points to. In the PDF, tap a page to link the whole page, drag a box to link a region, or drag across text to link a passage.";
+    this.guide.replaceChildren(
+      el("div", { class: "lghead" }, icon("chain"), el("b", {}, "Link two things"), el("span", { class: "lgstep" }, `Step ${step} of 2`),
+        el("button", { class: "btn small", type: "button", title: "Stop linking (Esc)", onclick: () => this.cancel() }, "Cancel")),
+      el("div", { class: "lgchips" }, chip(1, a, "Not chosen yet"), el("span", { class: "larrow" }, "→"), chip(2, null, step === 2 ? "Choose it now" : "After the first")),
+      el("div", { class: "lghint" }, hint));
   }
   cancel() {
     if (!this.pick) return;
-    this.pick = null; this.banner.hidden = true;
+    this.pick = null; this.guide.hidden = true;
     for (const p of Object.values(this.app.panels)) { p.root.classList.remove("linkpick"); p.pickPrev = null; if (p.action && p.action.type === "pick") p.action = null; p.render(); }
   }
   /** One end was chosen. */
   choose(anchor, panel) {
     if (!this.pick || !anchor) return;
-    if (!this.pick.a) { this.pick.a = anchor; this.say(); toast("First end chosen. Now choose the other end."); return; }
+    if (!this.pick.a) { this.pick.a = anchor; this.say(); if (anchor.k === "item") this.showPdfFor(); return; }
     const first = this.pick.a, res = this.store.add(first, anchor);
     if (!res) { toast("Choose a different place for the other end."); return; }
     this.cancel();
     for (const an of [first, anchor]) { const r = this.resolve(an); if (r.panel) { r.panel.dirty = true; r.panel.ui(); } }
     this.app.scheduleAutosave();
-    toast(res.created ? "Linked. Press the chain mark to jump to the other end." : "These two are already linked.");
+    toast(res.created ? `Linked: “${this.describe(first).title}” ↔ “${this.describe(anchor).title}”. Press the chain mark on either one to jump to the other.` : "These two are already linked.", 4200);
   }
   /** pointer events of a panel while picking (called by Panel). Returns true when the event was taken. */
   down(panel, e, l) {
@@ -245,7 +278,7 @@ export class LinkController {
         ctx.setLineDash([]);
       }
       let cx, cy;
-      if (g.bounds) { cx = Math.min(w - r, Math.max(r, g.bounds[2])); cy = Math.min(h - r, Math.max(r, g.bounds[1])); }
+      if (g.bounds) { cx = Math.min(w - r, Math.max(r, g.bounds[2] + r * 0.9)); cy = Math.min(h - r, Math.max(r, g.bounds[1] - r * 0.9)); }       // (just outside the top right corner: not under the selection handles)
       else { cx = w - r * 1.6; cy = Math.min(h - r, Math.max(r * 1.6, panel.belowBars(i) + r * 1.4) + stack++ * r * 2.4); }     // a whole page: its badges sit at the right edge, just below the toolbars (they follow the page while it is on screen)
       this.badge(ctx, cx, cy, r, g.links.length, col);
       const [sx, sy] = panel.pageToScreenAt(i, cx, cy);
@@ -288,24 +321,35 @@ export class LinkController {
     if (!anchorEl) document.body.append(a);
     popup(a, box, { onClose: () => { if (!anchorEl) a.remove(); } });
   }
-  /** All links of the workspace. */
+  /** The list of all links: what they are for, how to make one, and every link with both ends (broken ones first). */
   async manage() {
-    const draw = () => {
-      const links = this.store.all();
-      if (!links.length) return el("p", { class: "muted" }, "No links yet. Press Link in a panel, choose one end (a note, a text box ...) and then the other (a PDF page, a region or a passage of text).");
-      return el("div", { class: "linklist" }, ...links.map((lk) => {
+    const ref = {};
+    const list = () => {
+      const all = this.store.all();
+      if (!all.length) return el("div", { class: "lempty" },
+        el("p", { class: "lbig" }, "No links yet."),
+        el("ol", { class: "lsteps" },
+          el("li", {}, el("b", {}, "Select"), " a note, text box or drawing (Select tool), or just press Link."),
+          el("li", {}, "Press the ", el("b", {}, "Link"), " button in the panel toolbar."),
+          el("li", {}, "Tap the ", el("b", {}, "PDF page"), " it belongs to — or drag a box around a region, or across some text.")));
+      const row = (lk) => {
         const A = this.describe(lk.a), B = this.describe(lk.b);
-        const end = (an, d) => el("button", { class: "lgo", type: "button", onclick: () => { ref.close(); this.go(an, { link: lk }); } },
-          icon(d.icon), el("span", { class: "ltxt" }, el("span", { class: "ltitle" }, d.title), d.where ? el("span", { class: "lwhere" }, d.where) : null));
+        const end = (an, d) => el("button", { class: "lgo", type: "button", title: "Go to this end", onclick: () => { ref.close(); this.go(an, { link: lk }); } },
+          icon(d.icon), el("span", { class: "ltxt" }, el("span", { class: "lkind" }, this.kindOf(an)), el("span", { class: "ltitle" }, d.title), d.where ? el("span", { class: "lwhere" }, d.where) : null));
         return el("div", { class: "lrow" + (A.ok && B.ok ? "" : " bad") }, end(lk.a, A), el("span", { class: "larrow" }, "↔"), end(lk.b, B),
-          el("button", { class: "btn small", type: "button", title: "Remove this link", "aria-label": "Remove this link", onclick: () => { this.store.remove(lk.id); this.app.scheduleAutosave(); box.replaceChildren(draw()); } }, icon("trash")));
-      }));
+          el("button", { class: "btn small", type: "button", title: "Remove this link", "aria-label": "Remove this link", onclick: () => { this.store.remove(lk.id); this.app.scheduleAutosave(); box.replaceChildren(head(), list()); } }, icon("trash")));
+      };
+      const bad = all.filter((lk) => !this.describe(lk.a).ok || !this.describe(lk.b).ok), good = all.filter((lk) => !bad.includes(lk));
+      return el("div", { class: "linklist" },
+        bad.length ? el("div", { class: "lgroup warn" }, `Needs attention (${bad.length}) — the other end is missing`) : null, ...bad.map(row),
+        good.length ? el("div", { class: "lgroup" }, bad.length ? `Working (${good.length})` : `${good.length} link${good.length === 1 ? "" : "s"}`) : null, ...good.map(row));
     };
-    const ref = {}, box = el("div", { class: "linkmanager" }, draw());
-    const broken = this.store.all().filter((lk) => !this.describe(lk.a).ok || !this.describe(lk.b).ok);
-    await dialog({ title: `Linked notes (${this.store.size})`, content: box, ref,
-      buttons: [...(broken.length ? [{ label: `Remove ${broken.length} broken`, value: "rm", danger: true }] : []), { label: "Close", value: true, primary: true }] }).then((v) => {
-      if (v === "rm") { for (const lk of broken) this.store.remove(lk.id); this.app.scheduleAutosave(); toast("Broken links removed."); }
-    });
+    const head = () => el("p", { class: "lintro" }, "Links connect a note to the exact PDF page, region or text it is about. Press the chain mark on either end to jump to the other one.");
+    const box = el("div", { class: "linkmanager" }, head(), list());
+    const bad0 = this.store.all().filter((lk) => !this.describe(lk.a).ok || !this.describe(lk.b).ok);
+    const v = await dialog({ title: "Linked notes", content: box, ref,
+      buttons: [...(bad0.length ? [{ label: `Remove ${bad0.length} broken`, value: "rm", danger: true }] : []), { label: "New link", value: "new" }, { label: "Close", value: true, primary: true }] });
+    if (v === "rm") { for (const lk of bad0) this.store.remove(lk.id); this.app.scheduleAutosave(); toast("Broken links removed."); }
+    else if (v === "new") this.start(this.app.active || Object.values(this.app.panels)[0]);
   }
 }
