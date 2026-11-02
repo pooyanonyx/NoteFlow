@@ -6,6 +6,8 @@ import * as WS from "./workspace.js";
 import { Panel } from "./panel.js";
 import { LinkController } from "./linkui.js";
 import { SearchUI } from "./searchui.js";
+import { SmartLink } from "./smartlink.js";
+import { SnipTool } from "./snip.js";
 import { setImageLoadedCallback, bumpFontEpoch } from "./render.js";
 import { el, icon, toast, dialog, popup, closePopup } from "./ui.js";
 
@@ -52,6 +54,8 @@ export class App {
     document.fonts?.load?.('16px Vazirmatn', "\u067e\u0686\u0698\u06af").then(() => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); }).catch(() => {});   // pictures that finish decoding appear at once
     this.buildDom();
     this.search = new SearchUI(this);
+    this.smart = new SmartLink(this);
+    this.snip = new SnipTool(this);
     this.linksCount = el("span", { class: "lcount", hidden: true }); this.linksBtn.append(this.linksCount);          // (how many links there are)
     const upd = () => { const n = this.links.store.size; this.linksCount.textContent = String(n); this.linksCount.hidden = !n; };
     this.links.store.onChange(upd); upd();
@@ -87,7 +91,9 @@ export class App {
       b("save", "Save workspace", "Save everything (PDF, annotations, notebooks) in one file (" + K.MOD + "+S)", () => this.saveWorkspace()),
       b("plus", "New", "Start a new empty workspace", () => this.newWorkspace()),
       b("search", "Search", "Search everywhere: notebooks, PDFs, boards (" + K.MOD + "+Shift+F)", () => this.search.toggle()),
-      this.linksBtn = b("chain", "Links", "All links between notes and PDFs: see, open or remove them", () => this.links.manage()),
+      b("snip", "Snip", "Snipping tool: capture an area of a PDF page, a notebook page or the board, then copy it or insert it into another panel (" + K.MOD + "+Shift+S)", () => this.snip.toggle()),
+      this.linkBtn = b("chain", "Link", "Link two things: a note, text box or drawing with a PDF page, region or text. Select the note first, or just press Link.", () => this.startLink()),
+      this.linksBtn = b("list", "Links", "All links between notes and PDFs: see, open or remove them, and the Smart linking settings", () => this.links.manage()),
       el("span", { class: "gap" }), this.layoutBtn, this.switchBtn, this.seg, this.installBtn,
       b("menu", "", "Help", () => this.help(), "icon-only"), this.wsOpenInput);
     this.main = el("main", { class: "main" });
@@ -283,10 +289,11 @@ export class App {
     if (document.querySelector(".backdrop")) return;                            // a dialog is open: it owns the keyboard (it handles its own Escape)
     if (mod && !e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveWorkspace(); return; }
     if (mod && !e.altKey && e.shiftKey && key === "f") { e.preventDefault(); this.search.toggle(); return; }
+    if (mod && !e.altKey && e.shiftKey && key === "s") { e.preventDefault(); this.snip.toggle(); return; }
     if (K.isTextField(t)) return;                                               // typing: Space, letters, Ctrl+Z (text undo) ... are the browser's
     if (K.isFocusedControl(t) && (key === " " || key === "Enter")) return;      // a keyboard-focused button: Enter / Space activate it
     if (document.querySelector(".popup") && key !== "Escape") return;           // an open menu: no shortcuts behind it
-    if (key === "Escape") { if (this.links.picking) { this.links.cancel(); return; } closePopup(); p?.deselect(); return; }
+    if (key === "Escape") { if (this.snip.active) { this.snip.cancel(); return; } if (this.links.picking) { this.links.cancel(); return; } closePopup(); p?.deselect(); return; }
     if (e.altKey && !mod && /^[1-9]$/.test(key)) { e.preventDefault(); this.focusPanel(+key - 1); return; }
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); p?.goto(p.shown() - 1); return; }
     if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); p?.goto(p.shown() + 1); return; }
@@ -335,6 +342,13 @@ export class App {
     this.links.touch(); this.search.contentChanged();
     this.scheduleAutosave();
   }
+  /** The Link button (top bar): linking starts from what is selected in the active panel; when that panel has nothing selected but exactly one other visible panel has, from that one. */
+  startLink() {
+    const has = (p) => p && p.tool === "select" && p.selected !== null && p.pages[p.cur] && p.pages[p.cur].items[p.selected];
+    let src = this.active && this.panels[this.active.key] ? this.active : null;
+    if (!has(src)) { const sel = this.order.map((k) => this.panels[k]).filter(has); if (sel.length === 1) src = sel[0]; }
+    this.links.start(src || this.panels[this.order[0]]);
+  }
   /** A document was opened / closed (a PDF): links and search look at it again. */
   docsChanged() { this.links.touch(); this.links.renderAll(); this.search.contentChanged(); if (this.search.open) this.search.watchPdfs(); }
   /** Make sure the panel can be seen (a link or a search result lives there): it is added to the layout when the layout does not have it, and on a narrow screen its tab is opened. */
@@ -351,7 +365,7 @@ export class App {
   isPristine(p) { return !p.dirty && !p.name && p.pages.length === 1 && !p.items.length; }
   settings() {
     const P = this.panels;
-    return { window: { layout: [...this.order], view: this.viewMode, tab: this.tab, type: M.workspaceTypeOf(this.order) || "custom" }, board: P.board.viewState(), board2: P.board2.viewState(), pdf: P.pdf.viewState(), pdf2: P.pdf2.viewState(), notebook: P.nb.viewState(), notebook2: P.nb2.viewState() };
+    return { window: { layout: [...this.order], view: this.viewMode, tab: this.tab, type: M.workspaceTypeOf(this.order) || "custom" }, board: P.board.viewState(), board2: P.board2.viewState(), pdf: P.pdf.viewState(), pdf2: P.pdf2.viewState(), notebook: P.nb.viewState(), notebook2: P.nb2.viewState(), smartLinking: this.smart.mode };
   }
   nbPages(p) { p.finishEdit(); return p.pages.map((q) => M.pageToJson(q)); }
   /** What belongs to the workspace. Default: only the panels of the current structure (a PDF-only workspace has no notebook, and vice versa).
@@ -421,6 +435,7 @@ export class App {
     // workspace type from the file's metadata; older files have none: their saved layout is used (PDF + Notebook when nothing is saved)
     let order = M.layoutOfType(ws.type ?? ws.manifest?.workspace_type) || M.sanitizeLayout(win.layout);
     if (order.includes("nb2") && !ws.notebook2) order = [...M.DEFAULT_LAYOUT];
+    this.smart.setMode(typeof st.smartLinking === "string" ? st.smartLinking : "off", { silent: true });          // (Smart linking is off unless the workspace says otherwise)
     this.order = order; this.viewMode = M.normalizeView(win.view ?? "both", order);
     this.tab = Number.isInteger(win.tab) ? Math.max(0, Math.min(order.length - 1, win.tab)) : (win.view === "right" ? 1 : 0);
     for (const p of Object.values(P)) p.dirty = false;

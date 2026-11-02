@@ -12,7 +12,9 @@
 // If the PDF is replaced by a different file its hash no longer matches: the link says so instead of silently pointing at the wrong page.
 // Links are kept in ONE list (not inside the items), so a connection is found from either end, any number of links can meet at one item /
 // page / region, and the notebook / PDF files themselves stay exactly as they were. The list is written to the workspace as links.json.
-export const LINKS_FORMAT = "NoteFlow-links", LINKS_VERSION = 1, MAX_LINKS = 20000;
+export const LINKS_FORMAT = "NoteFlow-links", LINKS_VERSION = 1, MAX_LINKS = 20000, MAX_REJECTS = 3000;
+// A link made by the user has no src. src "suggested" = Smart linking proposed it and the user confirmed it; src "auto" = Smart linking made it on its own
+// (only when the user turned that on); score = the similarity (0..1) it was proposed with. rejects = suggestions the user said are not related (kept, so they do not come back).
 const SLOTS = ["pdf", "pdf2", "nb", "nb2", "board", "board2"];
 export const newLinkId = () => "l" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
 
@@ -49,18 +51,19 @@ export const sameAnchor = (a, b) => sig(a) === sig(b);
 export const anchorShape = (a) => (a.k === "item" ? "item" : a.quote ? "text" : a.rect ? "region" : "page");
 
 export class LinkStore {
-  constructor() { this.links = new Map(); this.index = new Map(); this.version = 0; this.listeners = new Set(); }
+  constructor() { this.links = new Map(); this.index = new Map(); this.version = 0; this.listeners = new Set(); this.rejects = new Set(); }
   get size() { return this.links.size; }
   onChange(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   emit() { this.version++; for (const f of this.listeners) { try { f(this); } catch (e) { console.warn(e); } } }
   all() { return [...this.links.values()]; }
   get(id) { return this.links.get(id) || null; }
   /** Connect two anchors. -> { link, created } (an identical connection, in either direction, is not made twice) or null when the two ends are the same place. */
-  add(a, b) {
+  add(a, b, { src = null, score = null } = {}) {
     a = sanitizeAnchor(a); b = sanitizeAnchor(b);
     if (!a || !b || sameAnchor(a, b) || this.links.size >= MAX_LINKS) return null;
     for (const l of this.forKey(anchorKey(a))) if ((sameAnchor(l.a, a) && sameAnchor(l.b, b)) || (sameAnchor(l.a, b) && sameAnchor(l.b, a))) return { link: l, created: false };
     const link = { id: newLinkId(), a, b, t: Date.now() };
+    if (src === "suggested" || src === "auto") { link.src = src; if (num(score) !== null) link.score = Math.round(Math.min(1, Math.max(0, score)) * 100) / 100; }
     this.put(link); this.emit();
     return { link, created: true };
   }
@@ -75,7 +78,12 @@ export class LinkStore {
     for (const k of new Set([anchorKey(l.a), anchorKey(l.b)])) { const s = this.index.get(k); if (s) { s.delete(id); if (!s.size) this.index.delete(k); } }
     this.emit(); return true;
   }
-  clear() { if (!this.links.size) return; this.links.clear(); this.index.clear(); this.emit(); }
+  clear() { if (!this.links.size && !this.rejects.size) return; this.links.clear(); this.index.clear(); this.rejects.clear(); this.emit(); }
+  /** Remember that a suggestion (its key, see smartlink.js) is not wanted. */
+  reject(key) { if (this.rejects.size >= MAX_REJECTS) this.rejects.delete(this.rejects.values().next().value); this.rejects.add(String(key).slice(0, 80)); }
+  isRejected(key) { return this.rejects.has(key); }
+  /** Number of links made by Smart linking (src auto / suggested), or of the given src. */
+  countSrc(src = null) { let n = 0; for (const l of this.links.values()) if (src ? l.src === src : !!l.src) n++; return n; }
   forKey(key) { const s = this.index.get(key); return s ? [...s].map((id) => this.links.get(id)) : []; }
   hasKey(key) { return this.index.has(key); }
   forItem(id) { return this.forKey("i:" + id); }
@@ -85,10 +93,14 @@ export class LinkStore {
   /** The end of a link that is at the given key (the other one when both ends are on the same page / item). */
   endAt(link, key) { return anchorKey(link.a) === key ? link.a : link.b; }
 
-  toJSON() { return { format: LINKS_FORMAT, version: LINKS_VERSION, links: this.all().map(({ id, a, b, t }) => ({ id, a, b, t })) }; }
+  toJSON() {
+    const out = { format: LINKS_FORMAT, version: LINKS_VERSION, links: this.all().map(({ id, a, b, t, src, score }) => ({ id, a, b, t, ...(src ? { src } : {}), ...(score !== undefined ? { score } : {}) })) };
+    if (this.rejects.size) out.rejects = [...this.rejects];
+    return out;
+  }
   /** Replace everything by the links of a saved list (invalid entries are dropped, nothing throws). Returns how many were dropped. */
   load(raw) {
-    this.links.clear(); this.index.clear();
+    this.links.clear(); this.index.clear(); this.rejects.clear();
     let data = raw, dropped = 0;
     if (typeof raw === "string") { try { data = JSON.parse(raw); } catch { data = null; } }
     const list = data && data.format === LINKS_FORMAT && Array.isArray(data.links) ? data.links : [];
@@ -96,8 +108,11 @@ export class LinkStore {
       const a = l && sanitizeAnchor(l.a), b = l && sanitizeAnchor(l.b);
       if (!a || !b || sameAnchor(a, b)) { dropped++; continue; }
       let id = text(l.id, 40) || newLinkId(); if (this.links.has(id)) id = newLinkId();
-      this.put({ id, a, b, t: num(l.t) ?? 0 });
+      const link = { id, a, b, t: num(l.t) ?? 0 };
+      if (l.src === "suggested" || l.src === "auto") { link.src = l.src; if (num(l.score) !== null) link.score = Math.min(1, Math.max(0, l.score)); }
+      this.put(link);
     }
+    if (data && Array.isArray(data.rejects)) for (const k of data.rejects.slice(0, MAX_REJECTS)) if (typeof k === "string") this.rejects.add(k.slice(0, 80));
     this.emit(); return dropped;
   }
 }

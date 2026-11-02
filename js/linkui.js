@@ -9,8 +9,9 @@ import * as R from "./render.js";
 import { LinkStore, anchorKey, anchorShape, sameAnchor } from "./links.js";
 import { pageTextData, rectsForRange } from "./pdftext.js";
 import { el, toast, popup, closePopup, dialog, icon } from "./ui.js";
+import { MODES } from "./smartlink.js";
 
-const TEAL = "#00897b", WARN = "#ef6c00", PANELS = ["pdf", "pdf2", "nb", "nb2", "board", "board2"];
+const TEAL = "#00897b", SMART = "#7e57c2", WARN = "#ef6c00", PANELS = ["pdf", "pdf2", "nb", "nb2", "board", "board2"];
 const idSets = new WeakMap();                                       // items array -> Set of the ids in it (pages are replaced, never edited, so this stays right)
 const idsOf = (items) => { let s = idSets.get(items); if (!s) { s = new Set(); for (const d of items) if (d.id) s.add(d.id); idSets.set(items, s); } return s; };
 const clean = (s, n = 90) => String(s || "").replace(/\s+/g, " ").trim().slice(0, n);
@@ -111,8 +112,8 @@ export class LinkController {
   }
 
   // ------------------------------------------------------------ making anchors
-  itemAnchor(panel, idx) {
-    const pg = panel.pages[panel.cur], d = pg && pg.items[idx];
+  itemAnchor(panel, idx, page = panel.cur) {
+    const pg = panel.pages[page], d = pg && pg.items[idx];
     if (!d || d.t === "conn") return null;
     const fresh = !d.id; M.ensureId(d);
     if (fresh) { pg.items = pg.items.slice(); panel.dirty = true; this.app.onChange(panel); }          // (a new array: the session backup writes this page again, with the id)
@@ -136,7 +137,7 @@ export class LinkController {
     let a = null;
     if (panel.tool === "select" && panel.selected !== null) {
       a = this.itemAnchor(panel, panel.selected);
-      if (a && this.store.forItem(a.id).length) { this.openMenu(panel, panel.linkBtn, [{ key: anchorKey(a), anchor: a, links: this.store.forItem(a.id) }], { add: () => this.begin(a) }); return; }
+      if (a && this.store.forItem(a.id).length) { this.openMenu(panel, this.app.linkBtn, [{ key: anchorKey(a), anchor: a, links: this.store.forItem(a.id) }], { add: () => this.begin(a) }); return; }
     }
     this.begin(a);
   }
@@ -271,9 +272,9 @@ export class LinkController {
     ctx.save();
     for (const g of groups.values()) {
       const broken = g.links.some((l) => this.resolve(sameAnchor(l.a, g.anchor) || anchorKey(l.a) === g.key ? l.b : l.a).state !== "ok");
-      const col = broken ? WARN : TEAL;
+      const smart = g.links.every((l) => l.src), col = broken ? WARN : smart ? SMART : TEAL;          // (links made by Smart linking are purple, the ones the user made are teal)
       if (g.anchor.k === "pdf" && g.rects.length) {
-        ctx.setLineDash([5 / s, 3 / s]); ctx.lineWidth = 1.5 / s; ctx.strokeStyle = col; ctx.fillStyle = g.anchor.quote ? "rgba(0,137,123,.20)" : "rgba(0,137,123,.07)";
+        ctx.setLineDash([5 / s, 3 / s]); ctx.lineWidth = 1.5 / s; ctx.strokeStyle = col; ctx.fillStyle = smart ? (g.anchor.quote ? "rgba(126,87,194,.20)" : "rgba(126,87,194,.07)") : g.anchor.quote ? "rgba(0,137,123,.20)" : "rgba(0,137,123,.07)";
         for (const q of g.rects) { ctx.fillRect(q[0], q[1], q[2] - q[0], q[3] - q[1]); if (!g.anchor.quote) ctx.strokeRect(q[0], q[1], q[2] - q[0], q[3] - q[1]); }
         ctx.setLineDash([]);
       }
@@ -305,6 +306,8 @@ export class LinkController {
   }
 
   // ------------------------------------------------------------ lists
+  /** "Suggested · 87%" / "Auto · 94%" for a link Smart linking made (nothing for a link the user made). */
+  tag(lk) { return lk.src ? el("span", { class: "ltag " + lk.src, title: lk.src === "auto" ? "Made automatically by Smart linking" : "Suggested by Smart linking, confirmed by you" }, (lk.src === "auto" ? "Auto" : "Suggested") + (lk.score ? ` · ${Math.round(lk.score * 100)}%` : "")) : null; }
   /** A list of the links at one or more places: where each goes, a button to go there and one to remove it. */
   openMenu(panel, anchorEl, groups, { add = null, at = null } = {}) {
     const rows = [];
@@ -312,7 +315,7 @@ export class LinkController {
       const other = this.store.otherEnd(lk, g.anchor), d = this.describe(other);
       rows.push(el("div", { class: "lrow" + (d.ok ? "" : " bad") },
         el("button", { class: "lgo", type: "button", title: "Go there", onclick: () => { closePopup(); this.go(other, { link: lk, from: panel }); } },
-          icon(d.icon), el("span", { class: "ltxt" }, el("span", { class: "ltitle" }, d.title), d.where ? el("span", { class: "lwhere" }, d.where) : null)),
+          icon(d.icon), el("span", { class: "ltxt" }, el("span", { class: "ltitle" }, d.title), d.where ? el("span", { class: "lwhere" }, d.where) : null)), this.tag(lk),
         el("button", { class: "btn small", type: "button", title: "Remove this link", "aria-label": "Remove this link", onclick: () => { this.store.remove(lk.id); this.app.scheduleAutosave(); closePopup(); } }, icon("trash"))));
     }
     const box = el("div", { class: "linkmenu" }, el("div", { class: "lhead" }, "Linked to"), ...rows,
@@ -336,16 +339,26 @@ export class LinkController {
         const A = this.describe(lk.a), B = this.describe(lk.b);
         const end = (an, d) => el("button", { class: "lgo", type: "button", title: "Go to this end", onclick: () => { ref.close(); this.go(an, { link: lk }); } },
           icon(d.icon), el("span", { class: "ltxt" }, el("span", { class: "lkind" }, this.kindOf(an)), el("span", { class: "ltitle" }, d.title), d.where ? el("span", { class: "lwhere" }, d.where) : null));
-        return el("div", { class: "lrow" + (A.ok && B.ok ? "" : " bad") }, end(lk.a, A), el("span", { class: "larrow" }, "↔"), end(lk.b, B),
-          el("button", { class: "btn small", type: "button", title: "Remove this link", "aria-label": "Remove this link", onclick: () => { this.store.remove(lk.id); this.app.scheduleAutosave(); box.replaceChildren(head(), list()); } }, icon("trash")));
+        return el("div", { class: "lrow" + (A.ok && B.ok ? "" : " bad") + (lk.src ? " smart" : "") }, end(lk.a, A), el("span", { class: "lmid" }, el("span", { class: "larrow" }, "↔"), this.tag(lk)), end(lk.b, B),
+          el("button", { class: "btn small", type: "button", title: "Remove this link", "aria-label": "Remove this link", onclick: () => { this.store.remove(lk.id); this.app.scheduleAutosave(); box.replaceChildren(head(), smartBox(), list()); } }, icon("trash")));
       };
       const bad = all.filter((lk) => !this.describe(lk.a).ok || !this.describe(lk.b).ok), good = all.filter((lk) => !bad.includes(lk));
       return el("div", { class: "linklist" },
         bad.length ? el("div", { class: "lgroup warn" }, `Needs attention (${bad.length}) — the other end is missing`) : null, ...bad.map(row),
         good.length ? el("div", { class: "lgroup" }, bad.length ? `Working (${good.length})` : `${good.length} link${good.length === 1 ? "" : "s"}`) : null, ...good.map(row));
     };
+    const smartBox = () => {                                                                    // Smart linking: the setting, what it does, and its limits
+      const sm = this.app.smart, nAuto = this.store.countSrc("auto");
+      const sel = el("select", { "aria-label": "Smart linking", onchange: () => { sm.setMode(sel.value); box.replaceChildren(head(), smartBox(), list()); } }, MODES.map(([v, l]) => el("option", { value: v, selected: v === sm.mode }, l)));
+      return el("div", { class: "smartbox" },
+        el("div", { class: "smhead" }, el("b", {}, "Smart linking"), sel),
+        el("p", { class: "smnote" }, "Compares only the pages you are looking at (for example PDF page 20 and Notebook page 100) and offers a link when a note closely matches a passage, even if worded differently. It runs on this device and sends nothing anywhere. It reads typed text only: handwriting, images and PDF pages without selectable text cannot be analyzed."),
+        el("div", { class: "smact" },
+          el("button", { class: "btn small", type: "button", onclick: () => { ref.close(); sm.scan({ manual: true }); } }, "Check the open pages now"),
+          nAuto ? el("button", { class: "btn small danger", type: "button", onclick: () => { const n = sm.removeAutomatic(); toast(`${n} automatic link${n === 1 ? "" : "s"} removed.`); box.replaceChildren(head(), smartBox(), list()); } }, `Remove ${nAuto} automatic link${nAuto === 1 ? "" : "s"}`) : null));
+    };
     const head = () => el("p", { class: "lintro" }, "Links connect a note to the exact PDF page, region or text it is about. Press the chain mark on either end to jump to the other one.");
-    const box = el("div", { class: "linkmanager" }, head(), list());
+    const box = el("div", { class: "linkmanager" }, head(), smartBox(), list());
     const bad0 = this.store.all().filter((lk) => !this.describe(lk.a).ok || !this.describe(lk.b).ok);
     const v = await dialog({ title: "Linked notes", content: box, ref,
       buttons: [...(bad0.length ? [{ label: `Remove ${bad0.length} broken`, value: "rm", danger: true }] : []), { label: "New link", value: "new" }, { label: "Close", value: true, primary: true }] });

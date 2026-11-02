@@ -60,3 +60,25 @@ test("item ids: kept through load / save, made once, not copied onto the pieces 
   const parts = M.erasePen(stroke, [24, -5], [26, 5], 1); assert.equal(parts.length, 2); assert.equal(parts[0].id, "ipen"); assert.equal(parts[1].id, undefined);
   const nb = M.parseNotebook(M.notebookToJson([{ paper: "lined", items: [d] }])); assert.equal(nb[0].items[0].id, "ixyz");
 });
+
+test("smart links: src and score are kept, only known values are accepted, manual links have neither", () => {
+  const s = new LinkStore();
+  const a = s.add(item("i1"), page(1), { src: "suggested", score: 0.734 }).link, b = s.add(item("i2"), page(2), { src: "auto", score: 3 }).link, c = s.add(item("i3"), page(3)).link;
+  const d = s.add(item("i4"), page(4), { src: "bogus", score: 0.5 }).link;
+  assert.deepEqual([a.src, a.score, b.src, b.score, c.src, c.score, d.src, d.score], ["suggested", 0.73, "auto", 1, undefined, undefined, undefined, undefined]);
+  assert.equal(s.countSrc(), 2); assert.equal(s.countSrc("auto"), 1);
+  const t = new LinkStore(); t.load(JSON.stringify(s.toJSON()));
+  assert.deepEqual(t.all().map((l) => [l.src, l.score]).sort(), s.all().map((l) => [l.src, l.score]).sort());
+  assert.equal(JSON.parse(JSON.stringify(s.toJSON())).links.find((l) => l.id === c.id).src, undefined);          // a manual link is written exactly as before
+  const u = new LinkStore(); u.load({ format: LINKS_FORMAT, version: 1, links: [{ a: item("x"), b: page(1), src: "evil", score: "high" }] });
+  assert.equal(u.all()[0].src, undefined); assert.equal(u.all()[0].score, undefined);
+});
+test("rejected suggestions are remembered, saved, bounded and cleared with the links", () => {
+  const s = new LinkStore(); s.reject("abc|pdf:1:2:3"); s.reject("def");
+  assert.equal(s.isRejected("abc|pdf:1:2:3"), true); assert.equal(s.isRejected("zzz"), false);
+  const t = new LinkStore(); t.load(JSON.stringify(s.toJSON())); assert.equal(t.isRejected("def"), true); assert.equal(t.rejects.size, 2);
+  t.load({ format: LINKS_FORMAT, version: 1, links: [], rejects: [5, null, "ok"] }); assert.deepEqual([...t.rejects], ["ok"]);
+  const big = new LinkStore(); for (let i = 0; i < 3100; i++) big.reject("k" + i); assert.equal(big.rejects.size, 3000); assert.equal(big.isRejected("k0"), false); assert.equal(big.isRejected("k3099"), true);
+  s.clear(); assert.equal(s.rejects.size, 0);
+  assert.equal("rejects" in new LinkStore().toJSON(), false);                                                       // nothing to keep: nothing written
+});

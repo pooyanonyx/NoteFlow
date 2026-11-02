@@ -66,7 +66,7 @@ export class Panel {
     this.snapLines = true;                                          // text written on lined paper follows the printed rules (see render.js "writing on ruled paper")
     this.shapeKind = "rect"; this.fill = { shape: false, mind: false }; this.textStyle = { ...T.EXTRAS_DEFAULT.text }; this.fillKey = "";  // Shapes tool: active shape + Fill switch (Shapes and Mind map keep their own)
     this._bc = new WeakMap(); this.eraserPos = null;
-    this.marks = []; this.markTimer = 0; this.linkHits = []; this.pickPrev = null;      // highlights placed on pages (search result, "you are here" after a link), the pressable link marks, the area being picked
+    this.marks = []; this.markTimer = 0; this.linkHits = []; this.pickPrev = null; this.snipPrev = null;      // highlights placed on pages (search result, "you are here" after a link), the pressable link marks, the area being picked
     this.connStyle = "curve"; this.connArrow = true; this.nodeKind = "round"; this.mindKey = ""; this.linkTarget = null; this._nm = null;   // mind map defaults
     if (kind === "nb") { this.layout(); this.view.ty = 14; }
     if (kind === "board") this.layout();
@@ -138,8 +138,7 @@ export class Panel {
     this.hactions.prepend(this.b.undo, this.b.redo);
     this.b.paste = b("paste", "Paste", "Paste an image (e.g. a screenshot) or text", () => this.app.pasteButton(this));
     this.b.image = b("image", "Image", "Insert an image from a file or the camera", () => this.imgInput.click());
-    this.b.link = this.linkBtn = b("chain", "Link", "Link a note, text box or drawing with a PDF page, region or text (and back). Select the note first, or just press Link.", () => this.app.links.start(this), "linkbtn");
-    fileBar.append(el("span", { class: "gap" }), this.b.paste, this.b.image, this.b.link);
+    fileBar.append(el("span", { class: "gap" }), this.b.paste, this.b.image);
 
     const pageBar = mk("bar");
     this.b.prev = b("prev", "", "Previous page", () => this.goto(this.cur - 1));
@@ -499,6 +498,20 @@ export class Panel {
     if (outY) this.view.ty += (this.kind === "board" ? this.ch / 2 : this.ch * 0.38) - (ay + by) / 2;
     this.clampView(); this.positionEditor(); this.scheduleRaster(); this.render();
   }
+  /** The area being snipped: everything else on the page is dimmed, the area is outlined and its size is shown. */
+  drawSnip(ctx, i, w, h) {
+    const sp = this.snipPrev;
+    if (!sp || sp.page !== i) return;
+    const s = this.view.scale, [x0, y0, x1, y1] = sp.rect;
+    ctx.save(); ctx.fillStyle = "rgba(15,23,42,.42)";
+    ctx.fillRect(0, 0, w, y0); ctx.fillRect(0, y1, w, h - y1); ctx.fillRect(0, y0, x0, y1 - y0); ctx.fillRect(x1, y0, w - x1, y1 - y0);
+    ctx.lineWidth = 2 / s; ctx.strokeStyle = "#fff"; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.setLineDash([6 / s, 4 / s]); ctx.strokeStyle = "#1976d2"; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0); ctx.setLineDash([]);
+    const label = `${Math.round(x1 - x0)} × ${Math.round(y1 - y0)}`, fs = 12 / s;
+    ctx.font = `600 ${fs}px sans-serif`; const tw = ctx.measureText(label).width, ly = y0 - 6 / s > fs + 4 / s ? y0 - 6 / s : y1 + fs + 6 / s;
+    ctx.fillStyle = "#1976d2"; ctx.fillRect(x0, ly - fs - 3 / s, tw + 10 / s, fs + 7 / s); ctx.fillStyle = "#fff"; ctx.textBaseline = "alphabetic"; ctx.fillText(label, x0 + 5 / s, ly);
+    ctx.restore();
+  }
   drawMarks(ctx, i) {
     const s = this.view.scale, pp = this.pickPrev && this.pickPrev.page === i ? [{ kind: "pick", rects: this.pickPrev.rects }] : [];
     for (const m of [...this.marks.filter((q) => q.page === i), ...pp]) {
@@ -784,6 +797,7 @@ export class Panel {
         ctx.restore();
       }
       this.drawMarks(ctx, i);
+      this.drawSnip(ctx, i, w, h);
       this.app.links.draw(this, ctx, i, w, h);
       if (isCur && this.editing && this.editing.rich) this.drawRichCaret(ctx);
       if (isCur && this.selected !== null && list[this.selected]) this.drawSelection(ctx, list[this.selected]);
@@ -1032,7 +1046,8 @@ export class Panel {
     if (e.pointerType === "touch" && performance.now() - this.lastPen < 1200) { this.action = { type: "palm" }; return; }   // palm rejection while a pen is in use
     closePopup();
     const LK = this.app.links;
-    if (LK.picking) { if (LK.down(this, e, l)) return; }                                          // making a link: this press chooses an end
+    if (this.app.snip.active) { if (this.app.snip.down(this, e, l)) return; }                       // snipping: this press starts (or restarts) the area
+    else if (LK.picking) { if (LK.down(this, e, l)) return; }                                          // making a link: this press chooses an end
     else if ((this.tool === "select" || this.tool === "pan" || e.ctrlKey || e.metaKey) && LK.press(this, l, e)) { this.action = { type: "none" }; return; }   // a press on a link mark goes to the other end
     this.toolDown(e, l);
   }
@@ -1117,6 +1132,7 @@ export class Panel {
     const a = this.action;
     if (a.type === "palm" || a.type === "none") return;
     if (a.type === "pick") { this.app.links.move(this, e, l); return; }
+    if (a.type === "snip") { this.app.snip.move(this, e, l); return; }
     if (a.type === "pan") {
       this.view.tx += l.x - a.last.x; this.view.ty += l.y - a.last.y; a.last = l;
       if (!this.continuous()) this.view.fit = false;
@@ -1162,6 +1178,7 @@ export class Panel {
     const a = this.action; this.action = null;
     if (a.type === "palm" || a.type === "none") return;
     if (a.type === "pick") { this.action = a; this.app.links.up(this, e); return; }
+    if (a.type === "snip") { this.action = a; this.app.snip.up(this, e); return; }
     const p = this.toPage(e);
     if (a.type === "pan") {
       if (a.tap) this.tapSelect(null, l);
@@ -2138,7 +2155,8 @@ export class Panel {
   }
 
   // ----------------------------------------------------------- insert content
-  async insertImageBlob(blob) {
+  /** Put an image on the current page (centre of the view), selected so it can be moved / resized at once. opts.natural: [w, h] = its size on the page (default: the pixels at 75 %). */
+  async insertImageBlob(blob, opts = {}) {
     if (!this.hasPage) { toast("Open a PDF first."); return false; }
     this.finishEdit();
     let bmp;
@@ -2151,7 +2169,7 @@ export class Panel {
     const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(",")[1]); fr.onerror = rej; fr.readAsDataURL(png); });
     this.activateAt(this.ch / 2);
     const [pw, ph] = this.pageDims();
-    let w = c.width * 0.75, h = c.height * 0.75;
+    let w = opts.natural ? opts.natural[0] : c.width * 0.75, h = opts.natural ? opts.natural[1] : c.height * 0.75;
     const fit = Math.min(1, 0.6 * pw / w, 0.6 * ph / h);
     w *= fit; h *= fit;
     const ctr = this.screenToPage(this.cw / 2, this.ch / 2);

@@ -37,7 +37,7 @@ export async function writeWorkspace({ pdf = null, pdf2 = null, notebook = null,
   if (notebook2) zip.file("notebook2.json", M.notebookToJson(notebook2));
   if (board) zip.file("board.json", M.boardToJson(board));                  // boards: one file each, only for the panels the workspace has
   if (board2) zip.file("board2.json", M.boardToJson(board2));
-  if (links && links.links && links.links.length) zip.file("links.json", JSON.stringify(links));                    // (only when there are links)
+  if (links && ((links.links && links.links.length) || (links.rejects && links.rejects.length))) zip.file("links.json", JSON.stringify(links));      // (only when there is something to keep)
   for (const [prefix, p] of [["pdf", pdf], ["pdf2", pdf2]]) {
     if (!p) continue;
     zip.file(`${prefix}/original.pdf`, toBytes(p.source), { compression: "STORE" });   // PDFs are already compressed

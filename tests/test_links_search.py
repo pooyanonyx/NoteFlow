@@ -19,7 +19,9 @@ with sync_playwright() as pw:
     a.ev("async () => { await noteflow.setLayout(['pdf','nb'], false); }"); a.page.wait_for_timeout(400)
     P(PDF_JS, ["A"]); a.page.wait_for_timeout(700)
     P("() => noteflow.panels.nb.zoomBy(0.5)")
-    link_btn = lambda key: a.page.locator(f'.panel[data-key="{key}"] button[title^="Link a note"]')
+    def link_btn(key):                                                                   # the Link button is in the top bar: it starts from the ACTIVE panel's selection
+        P("(k) => noteflow.setActive(noteflow.panels[k])", key)
+        return a.page.locator('.topbar button[title^="Link two things"]')
     def screen(key, i, x, y):
         return P("([k, i, x, y]) => { const p = noteflow.panels[k], r = p.stage.getBoundingClientRect(), [sx, sy] = p.pageToScreenAt(i, x, y); return [r.left + sx, r.top + sy]; }", [key, i, x, y])
     def links(): return P("() => noteflow.links.store.toJSON().links")
@@ -42,8 +44,8 @@ with sync_playwright() as pw:
     write_note(150, "TCP notes"); select_note("TCP notes")
     link_btn("nb").click(); a.page.wait_for_timeout(150)
     pk = P("() => noteflow.links.pick")
-    C.check("Link with a note selected: it is the first end at once, and a guide card shows the steps", pk and pk["a"]["k"] == "item" and pk["a"]["pv"] == "TCP notes" and P("() => !document.querySelector('.linkguide').hidden"), pk)
-    g = a.page.locator(".linkguide").inner_text()
+    C.check("Link with a note selected: it is the first end at once, and a guide card shows the steps", pk and pk["a"]["k"] == "item" and pk["a"]["pv"] == "TCP notes" and P("() => !document.querySelector('.linkguide:not(.snipcard)').hidden"), pk)
+    g = a.page.locator(".linkguide:not(.snipcard)").inner_text()
     C.check("the guide says which step it is, shows the first end that was chosen, and tells what to do next", "Step 2 of 2" in g and "TCP notes" in g and "tap a page" in g, g)
     P("async () => { await noteflow.panels.pdf.goto(19); }"); a.page.wait_for_timeout(700)
     x, y = screen("pdf", 19, 300, 500); a.page.mouse.click(x, y); a.page.wait_for_timeout(300)

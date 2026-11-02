@@ -194,7 +194,6 @@ select.paper { max-width:150px; }
 .lchip .ltitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
 .lghint { font-size:13px; line-height:1.4; color:#334155; }
 .lcount { background:#00897b; color:#fff; border-radius:9px; font-size:11px; padding:0 6px; margin-inline-start:4px; line-height:16px; }
-.bars .btn.linkbtn .lbl { display:inline; }
 .lintro { margin:0 0 10px; color:#475569; font-size:13px; line-height:1.45; }
 .lempty { border:1px dashed var(--line); border-radius:12px; padding:12px 14px; background:#f8fafc; }
 .lbig { margin:0 0 6px; font-weight:700; font-size:15px; }
@@ -232,3 +231,31 @@ select.paper { max-width:150px; }
 .ssnip { overflow-wrap:anywhere; } .ssnip mark { background:#ffe082; color:inherit; border-radius:3px; padding:0 1px; }
 .snone { padding:12px; color:var(--muted); font-size:12px; }
 @media (max-width:560px) { .searchpanel { right:6px; left:6px; width:auto; } }
+
+/* ---- Smart linking: the settings box, the suggestion card, links made by Smart linking ---- */
+.smartbox { border:1px solid #d9cdf0; background:#f7f3fd; border-radius:12px; padding:10px 12px; margin:0 0 12px; }
+.smhead { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#4a2f8a; }
+.smhead select { font:inherit; font-size:12px; border:1px solid #cdbfe9; border-radius:6px; padding:3px 4px; background:#fff; max-width:62%; }
+.smnote { margin:6px 0 8px; font-size:12px; line-height:1.45; color:#4b5563; }
+.smact { display:flex; flex-wrap:wrap; gap:8px; }
+.ltag { display:inline-block; font-size:10px; font-weight:700; padding:1px 6px; border-radius:8px; background:#ede7f6; color:#5e35b1; white-space:nowrap; }
+.ltag.auto { background:#5e35b1; color:#fff; }
+.lrow.smart { border-color:#cdbfe9; }
+.lmid { display:flex; flex-direction:column; align-items:center; gap:2px; flex:none; }
+.smartcard { position:fixed; z-index:58; right:12px; bottom:max(64px, calc(env(safe-area-inset-bottom) + 56px)); width:min(400px, calc(100vw - 24px)); box-sizing:border-box; background:#fff; color:#1f2937;
+  border:2px solid #7e57c2; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35); padding:8px 10px 10px; display:flex; flex-direction:column; gap:8px; max-height:50vh; overflow:auto; }
+.smartcard[hidden] { display:none; }
+.schead { display:flex; align-items:center; gap:8px; color:#5e35b1; } .schead b { flex:1; font-size:13px; }
+.sug { border:1px solid #e3dcf3; border-radius:10px; padding:6px 8px; background:#faf8fe; display:flex; flex-direction:column; gap:6px; }
+.sugrow { display:flex; gap:6px; font-size:12px; line-height:1.35; } .sugk { flex:none; width:54px; font-weight:700; color:#5e35b1; } .sugv { min-width:0; overflow-wrap:anywhere; }
+.sugact { display:flex; align-items:center; gap:6px; flex-wrap:wrap; } .sugpct { margin-inline-end:auto; font-size:11px; font-weight:700; color:#5e35b1; }
+.scmsg { margin:0; font-size:13px; } .scsmall { margin:0; font-size:11px; color:#64748b; line-height:1.4; } .scsmall.warn { color:#b34700; }
+@media (max-width:560px) { .smartcard { right:6px; left:6px; width:auto; } }
+
+/* ---- snipping tool ---- */
+.panel.snipping .stage { cursor:crosshair; }
+.snipcard { width:min(680px, calc(100vw - 20px)); }
+.snipview { max-height:220px; overflow:auto; display:flex; justify-content:center; align-items:center; border:1px solid var(--line); border-radius:8px; padding:6px;
+  background:repeating-conic-gradient(#e9edf2 0 25%, #fff 0 50%) 0 0 / 14px 14px; }
+.snipprev { max-width:100%; max-height:206px; width:auto; height:auto; box-shadow:0 1px 6px rgba(0,0,0,.25); background:#fff; }
+.snipact { display:flex; align-items:center; flex-wrap:wrap; gap:6px; } .sniplbl { font-size:12px; color:var(--muted); margin-inline-start:6px; }

@@ -52,5 +52,5 @@ export const SHORTCUT_GROUPS = [
   ["View", [
     ["Zoom in / out / fit", "+  /  -  /  0"], ["Scroll", "Arrow keys"], ["Scroll a screen up / down", "Page Up / Page Down"],
     ["First / last page (board: fit all)", "Home / End"], ["Previous / next page", "Alt+Left / Alt+Right"], ["Show / hide the toolbars", `${MOD}+.`]]],
-  ["Workspace", [["Save workspace", `${MOD}+S`], ["Search everywhere", `${MOD}+Shift+F`], ["Go to panel 1, 2, 3", "Alt+1 / 2 / 3"], ["This list", "?"]]],
+  ["Workspace", [["Save workspace", `${MOD}+S`], ["Search everywhere", `${MOD}+Shift+F`], ["Snipping tool", `${MOD}+Shift+S`], ["Go to panel 1, 2, 3", "Alt+1 / 2 / 3"], ["This list", "?"]]],
 ];
