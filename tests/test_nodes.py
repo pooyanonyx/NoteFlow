@@ -78,6 +78,20 @@ def run(a, P, size):
     a.ev(f"() => noteflow.panels.{P}.mindBtns.bigger.click()"); a.page.wait_for_timeout(80); s1 = a.ev(f"() => noteflow.panels.{P}.editing.proto.size")
     a.page.keyboard.press("Escape"); a.page.wait_for_timeout(120); nl = node(a, P)
     C.check(f"{P}: + while typing a new node changes its text size at once", s1 > s0 and nl["size"] == s1 and nl["text"] == "Live" and nl["g"] is True, (s0, s1, nl))
+    # ---- the size shown in the toolbar is always the size of what is being edited (a new child is typed while its PARENT is still the selected node)
+    lbl = lambda: a.ev(f"() => noteflow.panels.{P}.nodeSizeLbl.textContent")
+    real = lambda: a.ev(f"() => {{ const p = noteflow.panels.{P}, e = p.editing; return e ? String(Math.round((e.idx === null ? e.proto : p.items[e.idx]).size * 10) / 10) : null; }}")
+    a.ev(f"() => {{ const p = noteflow.panels.{P}; p.selected = null; p.setTool('node'); }}")
+    tap(a, P, *B(0, 330)); a.page.keyboard.type("Parent"); a.page.keyboard.press("Escape"); a.page.wait_for_timeout(120)
+    for _ in range(2): a.ev(f"() => noteflow.panels.{P}.mindBtns.bigger.click()"); a.page.wait_for_timeout(60)          # (the parent is selected: it gets bigger)
+    a.ev(f"() => {{ const p = noteflow.panels.{P}; p.setTool('select'); p.selected = p.items.findIndex((d) => d.t === 'node' && d.text === 'Parent'); p.addChild(); }}"); a.page.wait_for_timeout(150); a.page.keyboard.type("Kid")
+    parent_size = a.ev(f"() => String(Math.round(noteflow.panels.{P}.selItem().size * 10) / 10)")
+    seq, ok = [], True
+    for step in ["smaller", "smaller", "smaller", "bigger", "bigger", "bigger", "bigger"]:
+        a.ev(f"() => noteflow.panels.{P}.mindBtns.{step}.click()"); a.page.wait_for_timeout(70); seq.append((step, lbl(), real())); ok = ok and lbl() == real()
+    C.check(f"{P}: the size number follows every + / - while a child node is typed (the number is the child's size, not the selected parent's)", ok and seq[2][1] != parent_size, (parent_size, seq))
+    a.page.keyboard.press("Escape"); a.page.wait_for_timeout(150)
+    C.check(f"{P}: once typing ends, the number shows the selected node again", lbl() == a.ev(f"() => String(Math.round(noteflow.panels.{P}.selItem().size * 10) / 10)"), lbl())
     C.check(f"{P}: all connectors still attached at the end", attached(a, P) == [], attached(a, P))
 with sync_playwright() as pw:
     a = App(pw, width=1400, height=900); kb = a.page.keyboard; a.ev(SETUP); a.ev("async () => { window.__R = await import('./js/render.js'); }")

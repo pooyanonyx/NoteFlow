@@ -1543,7 +1543,8 @@ export class Panel {
   }
   updateMindUi() {
     const m = this.mindState(), hasParent = !!m.node && this.items.some((c) => c.t === "conn" && c.to === m.node.id);
-    const sz = m.node ? m.node.size : (this.editing && !this.editing.rich && this.editing.proto && this.editing.proto.t === "node" ? this.editing.proto.size : this.curStyle.size);
+    const et = this.editing && !this.editing.rich ? (this.editing.idx === null ? this.editing.proto : this.items[this.editing.idx]) : null;       // the node being typed (a new child / sibling is typed while its parent is still the selected one)
+    const sz = et && et.t === "node" ? et.size : m.node ? m.node.size : this.curStyle.size;                                                    // the size shown is the size of what is edited, else of the selected node, else the setting
     const key = [m.show, !!m.node, hasParent, !!m.conn, m.style, m.arrow, m.kind, sz].join("|");
     if (key === this.mindKey) return;
     this.mindKey = key; this.mindGroup.hidden = !m.show;
