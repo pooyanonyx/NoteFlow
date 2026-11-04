@@ -24,22 +24,25 @@ with sync_playwright() as pw:
     it2 = a.items()[-1]
     C.check("the settings stay for the next boxes too", it2["size"] == 22 and it2["runs"][0].get("b") == 1 and it2["lists"] == ["b"])
     C.check("the defaults are still set after creating boxes", a.ev(STATE)["ts"]["b"] is True and pressed(a, "Bold"))
-    # a box that is open: buttons act on that box only, defaults stay
+    # a box that is open: the buttons change the selected text AND become the Text tool's setting
     a.ev("() => { const p = noteflow.panels.nb; p.setTool('text'); p.startEdit(0); }")
     kb.press("Control+a"); btn(a, "Bold").click(); a.page.wait_for_timeout(100)
     c = a.ev("() => noteflow.panels.nb.rt.getContent()")
-    C.check("while a box is edited, Bold changes that text (selection), not the defaults", not any(r.get("b") for r in (c["runs"] or [])) and a.ev(STATE)["ts"]["b"] is True, c["runs"])
+    C.check("while a box is edited, Bold changes the selected text AND becomes the Text tool's setting (it was on: all text turned it off, so it is off now)", not any(r.get("b") for r in (c["runs"] or [])) and a.ev(STATE)["ts"]["b"] is False, c["runs"])
     a.finish()
-    C.check("…and the edit was stored on that box", not (a.items()[0].get("runs") or [{}])[0].get("b"))
+    C.check("…the edit was stored on that box, and the setting stays off after the edit ended", not (a.items()[0].get("runs") or [{}])[0].get("b") and a.ev(STATE)["ts"]["b"] is False)
+    a.ev("() => { const p = noteflow.panels.nb; p.textStyle.b = true; }")                             # (back to the starting point of the next part)
     # a selected (not edited) box: toolbar shows ITS format, buttons change it; defaults untouched
     a.ev("() => { const p = noteflow.panels.nb; p.setTool('select'); p.selected = 1; p.fmtKey = ''; p.render(); }"); a.page.wait_for_timeout(100)
     C.check("selected box: the toolbar shows that box's format (bold, italic), size", pressed(a, "Bold") and lbl(a) == "22", lbl(a))
+    before = a.ev(STATE)
     btn(a, "Bold").click(); btn(a, "Bigger").click(); a.page.wait_for_timeout(100)
     sel = a.items()[1]; st = a.ev(STATE)
     C.check("selected box: buttons change the box (bold off, bigger)", not sel["runs"][0].get("b") and sel["size"] == 24, (sel["runs"], sel["size"]))
-    C.check("…and leave the Text tool's defaults alone", st["ts"]["b"] is True and st["size"] == 22, st)
+    C.check("…and leave the Text tool's settings alone (changing a box that already exists is not choosing a setting for new text)", st["ts"] == before["ts"] and st["size"] == before["size"] == 22, (before, st))
     # numbered list default + Persian
     a.ev("() => { const p = noteflow.panels.nb; p.selected = null; p.setTool('text'); p.fmtKey = ''; p.render(); }"); a.page.wait_for_timeout(100)
+    a.ev("() => { const p = noteflow.panels.nb; p.textStyle = { b: true, i: true, u: true, list: 'b' }; p.fmtKey = ''; p.updateFmtUi(); }")
     btn(a, "Bold").click(); btn(a, "Italic").click(); btn(a, "Underline").click(); btn(a, "Bulleted").click(); btn(a, "Numbered").click(); btn(a, "Smaller").click(); btn(a, "Smaller").click()
     st = a.ev(STATE)
     C.check("switching everything off / numbered / smaller", st["ts"] == {"b": False, "i": False, "u": False, "list": "n"} and st["size"] == 18, st)
@@ -50,7 +53,9 @@ with sync_playwright() as pw:
     btn(a, "Numbered").click(); btn(a, "Bold").click()
     a.click_page(100, 500); btn(a, "Italic").click(); kb.type("x"); a.finish()
     it = a.items()[-1]
-    C.check("toggling italic while typing in the new box affects only that box", it["runs"] == [{"s": "x", "b": 1, "i": 1}] and not a.ev(STATE)["ts"]["i"], it.get("runs"))
+    C.check("toggling italic while typing in the new box: the box has it, and it is now the Text tool's setting", it["runs"] == [{"s": "x", "b": 1, "i": 1}] and a.ev(STATE)["ts"]["i"] is True, it.get("runs"))
+    a.click_page(100, 560); kb.type("y"); a.finish()
+    C.check("…so the next new box starts bold + italic too", a.items()[-1]["runs"] == [{"s": "y", "b": 1, "i": 1}], a.items()[-1].get("runs"))
     # Reset to default of the Text tool clears these settings too
     a.page.get_by_role("button", name="Brush").click(); a.page.wait_for_timeout(150)
     a.page.locator(".popup button", has_text="Reset to default").click(); a.page.wait_for_timeout(150)

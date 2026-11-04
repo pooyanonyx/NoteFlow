@@ -229,7 +229,7 @@ export class Panel {
     this.ta = el("textarea", { class: "editor", hidden: true, rows: 1, dir: "auto", spellcheck: false, autocapitalize: "off",
       oninput: () => this.positionEditor(), onblur: () => this.finishEdit(),
       onkeydown: (e) => this.onEditorKey(e) });
-    this.rt = new RichEditor({ onInput: () => this.onRichInput(), onSelection: () => this.onRichSel(), onKey: (e) => this.onRichKey(e), onBlur: (e) => this.onRichBlur(e) });
+    this.rt = new RichEditor({ onInput: () => this.onRichInput(), onSelection: () => this.onRichSel(), onKey: (e) => this.onRichKey(e), onBlur: (e) => this.onRichBlur(e), onFormat: (k) => this.richCmd(k) });
     this.guardFn = (e) => this.editGuard(e);
     this.msg = el("div", { class: "msg" });
     this.stage = el("div", { class: "stage", tabIndex: -1 }, this.canvas, this.ta, this.rt.el, this.msg);
@@ -281,6 +281,21 @@ export class Panel {
     return this.curStyle.color;
   }
   richEditing() { return !!this.editing && !!this.editing.rich; }
+  /** The TYPING STYLE for a text box: what the Text tool's settings (colour, size, bold, italic, underline) give to the text typed in it. These settings are the user's
+   *  persistent preference: a change made while typing is stored here (setTextPref / textStyle), so deleting, moving the caret, finishing the edit, creating another
+   *  box or switching tools never brings the old value back. A size / colour equal to the box's own needs no run of its own (null). */
+  typingFor(d) {
+    const g = this.groups.text, ts = this.textStyle;
+    return { b: !!ts.b, i: !!ts.i, u: !!ts.u, z: Math.abs(g.size - d.size) < 0.01 ? null : g.size, c: RT.normColor(g.color) === RT.normColor(d.color) ? null : g.color };
+  }
+  /** Give the open text box's editor the typing style of the current preferences (after any of them changed), and show them. */
+  syncTyping() {
+    if (!this.richEditing()) return;
+    this.rt.setTyping(this.typingFor(this.editedItem()));
+    this.rstateKey = ""; this.fmtKey = ""; this.updateColorDot(); this.updateFmtUi();
+  }
+  /** A Text tool setting (colour, size, opacity, brightness, thickness) chosen while typing: it becomes the tool's setting. */
+  setTextPref(key, value) { this.groups.text[key] = value; if (this.tool === "text") this.curStyle[key] = value; }
 
   applyStyle(key, value, commit = true) {
     this.curStyle[key] = value;
@@ -326,8 +341,9 @@ export class Panel {
   setTextColor(hex) {
     const ed = this.editing; if (!ed || !ed.rich) return;
     const base = this.editedItem().color, same = RT.normColor(hex) === RT.normColor(base);
-    this.rt.setColor(same ? null : hex);                                  // (the box's own colour is "no colour of its own": it still follows the box)
-    this.rt.sealUndo(); this.rstateKey = ""; this.updateColorDot(); this.resumeEdit();
+    this.rt.setStyle({ c: same ? null : hex });                           // the selected text (the box's own colour is "no colour of its own": it still follows the box)
+    this.setTextPref("color", hex); this.syncTyping();                    // and from now on the Text tool's colour: the text typed next, the next boxes
+    this.rt.sealUndo(); this.resumeEdit();
   }
   /** After a toolbar control (popup, slider, dialog) is done: the keyboard goes back to the text, at the same place. */
   resumeEdit() {
@@ -371,9 +387,9 @@ export class Panel {
   brushSet(key, value, commit) {
     const ed = this.editing;
     if (!ed || !ed.rich) { this.applyStyle(key, value, commit); return; }
-    if (key === "size") { this.rt.setSize(Number(value), "brush-size"); this.rstateKey = ""; }
+    if (key === "size") { const z = Number(value); this.rt.setStyle({ z }, "brush-size"); this.setTextPref("size", z); this.syncTyping(); }
     else {
-      this.curStyle[key] = value; const g = this.groupKey(); if (g) this.groups[g][key] = value;           // (the tool's setting too, as always)
+      this.setTextPref(key, value);                                                                     // (the Text tool's setting: it is what the next text uses)
       if (key === "alpha" || key === "bright") { ed.look = { ...(ed.look || {}), [key]: value }; this.syncLive(); this.render(); }
     }
     if (commit) { this.rt.sealUndo(); this.resumeEdit(); }
@@ -398,8 +414,8 @@ export class Panel {
     if (g === "shape") { this.shapeKind = T.EXTRAS_DEFAULT.shape.shapeKind; this.fill.shape = T.EXTRAS_DEFAULT.shape.fill; this.updateShapeBtn(); }
     if (g === "mind") { const e = T.EXTRAS_DEFAULT.mind; this.connStyle = e.connStyle; this.connArrow = e.connArrow; this.nodeKind = e.nodeKind; this.fill.mind = e.fill; }
     this.fillKey = ""; this.mindKey = ""; this.fmtKey = ""; this.updateColorDot();
-    if (this.richEditing() && GROUP_OF_TOOL[this.tool] === g) {          // a box is being typed: its opacity / brightness go back too, and what was set for the next typed text is dropped
-      this.editing.look = { alpha: this.groups[g].alpha, bright: this.groups[g].bright }; this.rt.pending = null; this.rstateKey = ""; this.syncLive();
+    if (g === "text" && this.richEditing()) {                            // a box is being typed: its opacity / brightness go back too, and the text typed next is in the default style again
+      this.editing.look = { alpha: this.groups[g].alpha, bright: this.groups[g].bright }; this.syncTyping(); this.syncLive();
     }
     if (this.brushBox) this.brushBox.update(this.brushStyle(), this.tool !== "hltext");
     this.render();
@@ -1723,12 +1739,12 @@ export class Panel {
   richCmd(kind) {
     const ed = this.editing, ladder = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 72, 96, 128];
     const step = (z, dir) => (dir > 0 ? ladder.find((x) => x > z + 0.01) ?? z : [...ladder].reverse().find((x) => x < z - 0.01) ?? z);
-    if (ed && ed.rich) {
+    if (ed && ed.rich) {                                                    // typing: applies to the selected text (if any) AND becomes the Text tool's setting
       const rs = this.richState();
-      if (kind === "b" || kind === "i" || kind === "u") this.rt.toggle(kind);
-      else if (kind === "ul") this.rt.setList("b"); else if (kind === "ol") this.rt.setList("n");
-      else if (kind === "smaller" || kind === "bigger") this.rt.setSize(step(rs.z ?? this.editedItem().size, kind === "bigger" ? 1 : -1));
-      this.rt.focus(); return;
+      if (kind === "b" || kind === "i" || kind === "u") { const on = rs[kind] !== true; this.rt.setStyle({ [kind]: on }); this.textStyle[kind] = on; }
+      else if (kind === "ul" || kind === "ol") { this.rt.setList(kind === "ul" ? "b" : "n"); this.rstateKey = ""; const L = this.richState().list; this.textStyle.list = L === "b" || L === "n" ? L : ""; }
+      else { const z = step(rs.z ?? this.editedItem().size, kind === "bigger" ? 1 : -1); this.rt.setStyle({ z }); this.setTextPref("size", z); }
+      this.syncTyping(); this.rt.focus(); return;
     }
     const d = this.textTarget();
     if (!d || d.t !== "text") {                          // no text box open or selected: these are the settings of the Text tool, used by the next box that is created
@@ -1872,8 +1888,8 @@ export class Panel {
       this.rt.show(); this.rt.setContent(c, this.richCfg(this.editedItem()));
       this.positionEditor(); this.syncLive(); this.render();
       this.rt.focus(); this.rt.setSel(c.text.length, c.text.length); this.caretReset();
-      if (fresh && (ts.b || ts.i || ts.u)) this.rt.setPending({ ...(ts.b ? { b: true } : {}), ...(ts.i ? { i: true } : {}), ...(ts.u ? { u: true } : {}) });    // what is typed first is bold / italic / underlined
-      this.fmtKey = ""; this.rstateKey = "";
+      this.rt.setTyping(this.typingFor(this.editedItem()));                                    // what is typed is in the Text tool's current settings (colour, size, bold, italic, underline)
+      this.fmtKey = ""; this.rstateKey = ""; this.updateColorDot();
       return;
     }
     this.ta.value = (d.t === "conn" ? d.label : d.text) || "";

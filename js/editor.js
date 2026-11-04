@@ -11,7 +11,7 @@ const isPara = (n) => n.nodeType === 1 && n.tagName === "DIV";
 export class RichEditor {
   constructor(handlers = {}) {
     this.h = handlers; this.cfg = { base: 16, s: 1, ruled: false, pitch: 24, fmt: null, indent: 24 };
-    this.pending = null; this.pendingAt = null; this.undoStack = []; this.redoStack = []; this.lastPush = 0; this.lastType = ""; this.composing = false;
+    this.typing = null; this.undoStack = []; this.redoStack = []; this.lastPush = 0; this.lastType = ""; this.composing = false;
     this.away = false; this.merge = null;                // away: the keyboard focus is on a toolbar control (slider ...), the caret / selection are kept and edits are applied without touching the DOM selection (see resume)
     this.el = document.createElement("div");
     Object.assign(this.el, { className: "editor rt", hidden: true, contentEditable: "true", spellcheck: false });
@@ -26,13 +26,12 @@ export class RichEditor {
     this.onSel = () => {
       if (this.el.hidden || this.away || !this.inside()) return;         // (away: the remembered selection is the truth; the DOM one may just have been reset by a rebuild)
       const sel = this.getSel();                        // (also remembers the selection for when the focus is elsewhere)
-      if (this.pending && this.pendingAt !== null && (sel[0] !== this.pendingAt || sel[1] !== this.pendingAt)) this.pending = null;   // the caret moved away: what was set for the next typed text no longer applies (as in a word processor)
       this.h.onSelection && this.h.onSelection();
     };
   }
   inside() { const s = document.getSelection(); return !!s && s.rangeCount > 0 && this.el.contains(s.anchorNode); }
   show() { this.el.hidden = false; document.addEventListener("selectionchange", this.onSel); }
-  hide() { this.el.hidden = true; document.removeEventListener("selectionchange", this.onSel); this.undoStack = []; this.redoStack = []; this.pending = null; this.pendingAt = null; this.away = false; this.merge = null; }
+  hide() { this.el.hidden = true; document.removeEventListener("selectionchange", this.onSel); this.undoStack = []; this.redoStack = []; this.typing = null; this.away = false; this.merge = null; }
   focus() { this.el.focus({ preventScroll: true }); }
   /** Give the keyboard back to the text after a toolbar control had it: the caret / selection are exactly where they were left. */
   resume() {
@@ -41,12 +40,9 @@ export class RichEditor {
     const [a, b] = this.lastSel || [0, 0]; this.setSel(a, b);
   }
   hasFocus() { return document.activeElement === this.el; }
-  setPending(p) { this.pending = p; this.pendingAt = this.getSel()[0]; }
-  /** The style chosen for the text typed next, but only while the caret is still where it was chosen. Checked when it is USED, never left to a later selectionchange event (that one fires after the next key). */
-  livePending(at) {
-    if (this.pending && this.pendingAt !== null && this.pendingAt !== at) { this.pending = null; this.pendingAt = null; }
-    return this.pending;
-  }
+  /** The TYPING STYLE: the formatting of the text typed next ({ b, i, u, z (size, null = the box's), c (colour, null = the box's) }), or null = like the text before the caret.
+   *  It is the user's preference (the host keeps it in step with the tool's settings): it stays whatever the caret does, whatever is deleted, and for the whole edit. */
+  setTyping(t) { this.typing = t ? { b: !!t.b, i: !!t.i, u: !!t.u, z: t.z ?? null, c: t.c ?? null } : null; }
 
   // ------------------------------------------------------------ content <-> DOM
   /** Replace what is shown by `content`. cfg: {base, s, ruled, pitch, fmt, indent}. sel = [a, b] puts the caret there. */
@@ -204,51 +200,39 @@ export class RichEditor {
     const c = this.getContent(), [a, b] = this.getSel(), r = fn(c, a, b);
     if (!r) return;
     const content = r.content || r, sel = r.sel || (selFn ? selFn(a, b) : [a, b]);
-    this.setContent(content, null, sel); this.pending = null; this.pendingAt = null;
+    this.setContent(content, null, sel);
     if (!this.away) { this.focus(); this.setSel(sel[0], sel[1]); }
     this.h.onInput && this.h.onInput();
   }
   sealUndo() { this.merge = null; }
   insert(str) {
     str = String(str).replace(/\r\n?/g, "\n"); if (!str) return;
-    this.edit((c, a, b) => ({ content: RT.replaceRange(c, a, b, str, this.pendingStyle(c, a)), sel: [a + str.length, a + str.length] }));
+    this.edit((c, a, b) => ({ content: RT.replaceRange(c, a, b, str, this.typedStyle(c, a)), sel: [a + str.length, a + str.length] }));
   }
-  pendingStyle(c, a) {
-    const st = a > 0 ? RT.styleOfChar(c, a - 1) : {}, p = this.livePending(a);
-    if (!p) return st;
-    const o = { ...st };
-    for (const k of ["b", "i", "u"]) if (k in p) { if (p[k]) o[k] = 1; else delete o[k]; }
-    if ("z" in p) { if (p.z === null) delete o.z; else o.z = p.z; }
-    if ("c" in p) { if (p.c === null) delete o.c; else o.c = p.c; }
+  /** The style of text inserted at a (typed, pasted, Enter): the typing style, else that of the character before. */
+  typedStyle(c, a) {
+    const t = this.typing;
+    if (!t) return a > 0 ? RT.styleOfChar(c, a - 1) : {};
+    const o = {};
+    if (t.b) o.b = 1; if (t.i) o.i = 1; if (t.u) o.u = 1; if (t.z !== null) o.z = t.z; if (t.c) o.c = t.c;
     return o;
   }
-  /** Bold / italic / underline: on the selection, or for the text typed next when nothing is selected. */
-  toggle(key) {
-    const c = this.getContent(), [a, b] = this.getSel();
-    if (a === b) { const cur = this.styleNow(c, a, b)[key] === true; this.setPending({ ...(this.pending || {}), [key]: !cur }); this.h.onSelection && this.h.onSelection(); return; }
-    const all = RT.styleOfRange(c, a, b, this.cfg.base)[key] === true;
-    this.edit((cc) => RT.applyStyle(cc, a, b, { [key]: !all }));
-  }
-  setSize(z, merge = null) {
+  /** Ctrl+B / I / U: the host decides (it applies it to the selection and keeps it as the preference). */
+  toggle(key) { this.h.onFormat && this.h.onFormat(key); }
+  /** Apply a style change to the SELECTED text (nothing happens without a selection: the host keeps the typing style). -> true when text was changed */
+  setStyle(patch, merge = null) {
     const [a, b] = this.getSel();
-    if (a === b) { this.setPending({ ...(this.pending || {}), z }); this.h.onSelection && this.h.onSelection(); return; }
-    this.edit((c) => RT.applyStyle(c, a, b, { z }), null, merge);
-  }
-  /** Text colour ("#rrggbb", or null = the box's own colour): the selected text, or the text typed next when nothing is selected. */
-  setColor(col, merge = null) {
-    const [a, b] = this.getSel();
-    if (a === b) { this.setPending({ ...(this.pending || {}), c: col }); this.h.onSelection && this.h.onSelection(); return; }
-    this.edit((c) => RT.applyStyle(c, a, b, { c: col }), null, merge);
+    if (a === b) return false;
+    this.edit((c) => RT.applyStyle(c, a, b, patch), null, merge);
+    return true;
   }
   setList(type) { this.edit((c, a, b) => RT.toggleList(c, a, b, type)); }
   /** Style at the caret / of the selection, including what is waiting to be typed. */
   styleNow(c = this.getContent(), a, b) {
     if (a === undefined) [a, b] = this.getSel();
     const st = RT.styleOfRange(c, a, b, this.cfg.base, this.cfg.color || null);
-    const pend = a === b ? this.livePending(a) : null;
-    if (pend) for (const k of ["b", "i", "u"]) if (k in pend) st[k] = pend[k];
-    if (pend && "z" in pend) st.z = pend.z ?? this.cfg.base;
-    if (pend && "c" in pend) st.c = pend.c ?? (this.cfg.color || null);
+    const t = a === b ? this.typing : null;                               // (a caret shows what will be typed; a selection shows what it is)
+    if (t) { st.b = !!t.b; st.i = !!t.i; st.u = !!t.u; st.z = t.z ?? this.cfg.base; st.c = t.c ?? (this.cfg.color || null); }
     const p = RT.paragraphIndexAt(c.text, a); st.list = RT.listAt(c, p);
     return st;
   }
@@ -257,7 +241,7 @@ export class RichEditor {
   step(from, to) {
     if (!from.length) return;
     to.push(this.snapshot()); const s = from.pop();
-    this.setContent(s.content, null, s.sel); this.pending = null; this.pendingAt = null; this.lastType = ""; this.merge = null;
+    this.setContent(s.content, null, s.sel); this.lastType = ""; this.merge = null;
     this.h.onInput && this.h.onInput();
   }
 
@@ -272,12 +256,19 @@ export class RichEditor {
     this.goalX = null;
     if (this.composing && e.isComposing !== false) { this.h.onInput && this.h.onInput(); return; }
     let sel = null;
-    const typed = !!(e && e.inputType === "insertText" && this.pending && e.data && this.livePending(Math.max(0, this.getSel()[0] - e.data.length)));
-    if (typed || !this.canonical()) {
+    const typed = !!(e && e.inputType === "insertText" && this.typing && e.data);
+    let rebuild = !this.canonical();
+    if (typed) {                                                         // the text just typed gets the typing style (only rebuilt when it does not have it already)
       let c = this.getContent(); sel = this.getSel();
-      if (typed) { const n = e.data.length, a = Math.max(0, sel[0] - n); c = RT.applyStyle(c, a, sel[0], this.stPatch(c, a)); this.pending = null; }
+      const n = e.data.length, a = Math.max(0, sel[0] - n), patch = this.stPatch(), have = RT.styleOfRange(c, a, sel[0], this.cfg.base, this.cfg.color || null);
+      const want = { b: patch.b, i: patch.i, u: patch.u, z: patch.z ?? this.cfg.base, c: patch.c ?? (this.cfg.color || null) };
+      if (have.b !== want.b || have.i !== want.i || have.u !== want.u || have.z !== want.z || have.c !== want.c) { c = RT.applyStyle(c, a, sel[0], patch); rebuild = true; }
+      if (rebuild) { this.setContent(c, null, sel); this.focus(); this.setSel(sel[0], sel[1]); }
+    } else if (rebuild) {
+      const c = this.getContent(); sel = this.getSel();
       this.setContent(c, null, sel); this.focus(); this.setSel(sel[0], sel[1]);
-    } else this.restyleNew();
+    }
+    if (!rebuild) this.restyleNew();
     this.h.onInput && this.h.onInput();
   }
   restyleNew() {                                      // text typed into an unstyled place gets sizes too (new spans / paragraphs the browser made)
@@ -290,13 +281,7 @@ export class RichEditor {
       for (const sp of p.querySelectorAll("span")) if (!sp.style.fontSize) { const z = sp.dataset.z ? +sp.dataset.z : base; sp.style.fontSize = z * s + "px"; sp.style.lineHeight = (ruled ? ruledLH(z, pitch) : z * 1.25) * s + "px"; }
     }
   }
-  stPatch(c, a) {                                      // style to give to the text just typed at [a, ...)
-    const p = this.pending, patch = {};
-    for (const k of ["b", "i", "u"]) if (k in p) patch[k] = !!p[k]; else patch[k] = !!(RT.styleOfChar(c, Math.max(0, a - 1))[k]);
-    if ("z" in p) patch.z = p.z;
-    if ("c" in p) patch.c = p.c;
-    return patch;
-  }
+  stPatch() { const t = this.typing; return { b: !!t.b, i: !!t.i, u: !!t.u, z: t.z, c: t.c }; }       // (the style to give to the text just typed: null z / c = the box's own)
   enter() {
     const c = this.getContent(), [a, b] = this.getSel(), pi = RT.paragraphIndexAt(c.text, a), pr = RT.paragraphRanges(c.text)[pi];
     if (a === b && RT.listAt(c, pi) && pr.start === pr.end) { this.edit((cc) => { const l = (cc.lists || []).slice(); l[pi] = ""; return RT.makeContent(cc.text, cc.runs, l); }); return; }   // Enter on an empty list item ends the list

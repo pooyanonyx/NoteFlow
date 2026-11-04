@@ -59,7 +59,7 @@ with sync_playwright() as pw:
     # bold really is bolder (ink coverage of identical letters)
     a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; }")
     def ink(a, txt, fmt):
-        a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; p.selected = null; p.setTool('text'); }")
+        a.ev("() => { const p = noteflow.panels.nb; p.pages[p.cur].items = []; p.selected = null; p.setTool('text'); p.resetTool('text'); }")      # (every box from the plain default: a format chosen while typing is the tool's setting from then on)
         a.click_page(100, 120); kb.type(txt)
         if fmt: kb.press("Control+a"); kb.press("Control+" + fmt)
         a.finish(); it = a.items()[-1]

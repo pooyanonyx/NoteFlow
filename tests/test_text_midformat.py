@@ -7,7 +7,7 @@ from harness import App, Checker, shot
 import numpy as np
 C = Checker()
 RED, BLUE = "#d32f2f", "#1976d2"          # PALETTE_ROWS[1][0] / [1][5]
-STATE = "() => { const p = noteflow.panels.nb; return { editing: !!p.editing, sel: p.rt.getSel(), away: p.rt.away, focus: document.activeElement === p.rt.el, c: p.rt.getContent(), pending: p.rt.pending }; }"
+STATE = "() => { const p = noteflow.panels.nb; return { editing: !!p.editing, sel: p.rt.getSel(), away: p.rt.away, focus: document.activeElement === p.rt.el, c: p.rt.getContent(), typing: p.rt.typing }; }"
 
 def runs(a): return [{k: v for k, v in r.items()} for r in (a.ev(STATE)["c"]["runs"] or [])]
 
@@ -16,19 +16,20 @@ with sync_playwright() as pw:
     a.ev("() => noteflow.panels.nb.zoomBy(0.5)"); a.page.wait_for_timeout(200)
     colour_btn = a.page.locator('button[title^="Choose a colour"]:visible').first
     brush_btn = a.page.locator('button.btn:has-text("Brush"):visible').first
+    def reset(): a.ev("() => noteflow.panels.nb.resetTool('text')")                      # (every part starts from the Text tool's defaults: what is chosen while typing stays chosen)
     def swatch(i): a.page.locator(".popup .sw").nth(i).click(); a.page.wait_for_timeout(120)
     def pick(i): colour_btn.click(); a.page.wait_for_timeout(120); swatch(i)
     def fmt(title): a.page.locator(f'.fmtgrp:visible button[title^="{title}"]').first.click(); a.page.wait_for_timeout(80)
 
     # ---- 1. colour in the middle of a sentence: only what is typed from there on
-    a.click_page(100, 150); kb.type("Hello ")
+    reset(); a.click_page(100, 150); kb.type("Hello ")
     before = a.ev(STATE)
     colour_btn.click(); a.page.wait_for_timeout(150)
     mid = a.ev(STATE)
     C.check("opening the Colour popup keeps the box open, the caret and the keyboard in the text", mid["editing"] and mid["sel"] == before["sel"] == [6, 6] and mid["focus"], mid)
     swatch(8)                                                                       # red
     after = a.ev(STATE)
-    C.check("picking a colour keeps editing, the caret and the content (nothing is coloured yet)", after["editing"] and after["sel"] == [6, 6] and after["focus"] and after["c"]["text"] == "Hello " and not after["c"]["runs"], after)
+    C.check("picking a colour keeps editing, the caret and the content (nothing is coloured yet)", after["editing"] and after["sel"] == [6, 6] and after["focus"] and after["c"]["text"] == "Hello " and not after["c"]["runs"] and after["typing"]["c"] == RED, after)
     kb.type("world")
     C.check("text typed after the pick is red, the text before is not", runs(a) == [{"s": "Hello "}, {"s": "world", "c": RED}], runs(a))
     pick(13); kb.type("!")                                                          # blue
@@ -39,7 +40,7 @@ with sync_playwright() as pw:
     C.check("the Colour button shows the colour being typed", "211, 47, 47" in dot, dot)
 
     # ---- 2. selection: only the selection; selection survives the popup; typing resumes after it
-    kb.press("Control+a"); kb.type("Hello world"); a.page.wait_for_timeout(100)
+    reset(); kb.press("Control+a"); kb.type("Hello world"); a.page.wait_for_timeout(100)
     for _ in range(5): kb.press("Shift+ArrowLeft")
     s0 = a.ev(STATE)["sel"]
     pick(13)
@@ -54,7 +55,7 @@ with sync_playwright() as pw:
     C.check("choosing the box's own colour removes the run colour", a.ev(STATE)["c"]["runs"] is None, runs(a))
 
     # ---- 3. size / bold / italic / underline mid sentence, mixed with colour
-    kb.press("Control+a"); kb.type("ab"); fmt("Bold"); kb.type("cd"); fmt("Bold"); pick(8); fmt("Bigger"); fmt("Italic"); kb.type("ef"); fmt("Underline"); kb.type("gh")
+    reset(); kb.press("Control+a"); kb.type("ab"); fmt("Bold"); kb.type("cd"); fmt("Bold"); pick(8); fmt("Bigger"); fmt("Italic"); kb.type("ef"); fmt("Underline"); kb.type("gh")
     r = runs(a)
     C.check("bold / colour / size / italic / underline switched in the middle of the text apply from that point on only",
             r == [{"s": "ab"}, {"s": "cd", "b": 1}, {"s": "ef", "i": 1, "z": 20, "c": RED}, {"s": "gh", "i": 1, "u": 1, "z": 20, "c": RED}], r)
@@ -67,17 +68,23 @@ with sync_playwright() as pw:
     C.check("re-opening the box shows the same colours / formatting", runs(a) == r and a.ev(STATE)["sel"] == [8, 8], runs(a))
     a.finish()
 
-    # ---- 4. caret moved away: the colour set for the next text does not follow to another place
-    a.click_page(100, 300); kb.type("one two"); pick(8)
+    # ---- 4. a setting chosen while typing STAYS chosen: caret moves, Backspace, selecting and retyping, finishing and starting another box
+    reset(); a.click_page(100, 300); kb.type("one two"); pick(8)
     kb.press("Home"); kb.type("X")
-    C.check("a colour chosen for the next text is dropped when the caret moves elsewhere", runs(a) == [{"s": "Xone two"}] or a.ev(STATE)["c"]["runs"] is None, runs(a))
+    C.check("a colour chosen while typing is still in force after the caret moved elsewhere (text typed there is in it too)", runs(a) == [{"s": "X", "c": RED}, {"s": "one two"}], runs(a))
+    kb.press("End"); kb.type("abc"); kb.press("Backspace"); kb.press("Backspace"); kb.press("Backspace"); kb.press("Backspace"); kb.type("Z")
+    C.check("Backspace / deleting text does not bring the old colour back: what is typed afterwards is still in the chosen colour; the text that was already there is untouched",
+            runs(a) == [{"s": "X", "c": RED}, {"s": "one tw"}, {"s": "Z", "c": RED}] or runs(a) == [{"s": "X", "c": RED}, {"s": "one two"}, {"s": "Z", "c": RED}], runs(a))
+    kb.press("Control+a"); kb.type("fresh")
+    C.check("select-all + type: the new text is in the chosen colour", runs(a) == [{"s": "fresh", "c": RED}], runs(a))
     a.finish()
-    # the same, without any help from event timing: the caret moves and the next text arrives in the SAME task (selectionchange cannot have fired yet; on a slow / busy machine that is what a fast typist looks like)
-    a.click_page(100, 335); kb.type("one two"); pick(8)
-    a.ev("() => { const p = noteflow.panels.nb; p.rt.setSel(0, 0); document.execCommand('insertText', false, 'X'); }"); a.page.wait_for_timeout(150)
-    C.check("a colour chosen for the next text does not apply after the caret moved, even when the next key comes at once", a.ev(STATE)["c"]["runs"] is None, runs(a))
-    kb.press("End"); kb.type("Y")
-    C.check("…and the pending state is gone for good", a.ev(STATE)["c"]["runs"] is None and a.ev(STATE)["pending"] is None, runs(a))
+    C.check("the chosen colour is now the Text tool's colour (shown, kept, saved)", a.ev("() => noteflow.panels.nb.groups.text.color") == RED and a.ev("() => noteflow.panels.nb.curStyle.color") == RED)
+    a.click_page(100, 335); kb.type("next box"); a.finish()
+    box2 = [d for d in a.items() if d.get("text") == "next box"][0]
+    C.check("the next text box is created in that colour, as a whole (its own colour is the chosen one)", box2["color"] == RED and not box2.get("runs"), (box2["color"], box2.get("runs")))
+    C.check("the first box was not changed by the new choice", [d for d in a.items() if d.get("text") == "fresh"][0]["runs"] == [{"s": "fresh", "c": RED}] and True)
+    pick(13)
+    C.check("…and choosing another colour while no box is open also changes the setting (the next box)", a.ev("() => noteflow.panels.nb.groups.text.color") == BLUE)
     a.finish()
 
     # ---- 5. Brush popup: slider drag keeps the text; size from there on; one undo step; opacity for the box
@@ -123,14 +130,14 @@ with sync_playwright() as pw:
     C.check("opening the custom colour dialog keeps the text box open", a.ev(STATE)["editing"])
     hexf = a.page.locator(".cdlg input.hex"); hexf.fill("#00796b"); a.page.get_by_role("button", name="OK", exact=True).click(); a.page.wait_for_timeout(200)
     st = a.ev(STATE)
-    C.check("…the colour is used from the caret on and the caret is where it was", st["editing"] and st["sel"] == s0 and st["focus"] and st["pending"] == {"c": "#00796b"}, st)
+    C.check("…the colour is used from the caret on and the caret is where it was", st["editing"] and st["sel"] == s0 and st["focus"] and st["typing"]["c"] == "#00796b", st)
     kb.type("teal")
     C.check("custom colour is applied to the text typed next", runs(a)[-1] == {"s": "teal", "c": "#00796b"}, runs(a))
     colour_btn.click(); a.page.wait_for_timeout(100)
     a.page.get_by_role("button", name="Custom color").click(); a.page.wait_for_timeout(200)
     a.page.get_by_role("button", name="Cancel").click(); a.page.wait_for_timeout(200)
     st = a.ev(STATE)
-    C.check("cancelling the dialog also leaves the text exactly as it was", st["editing"] and st["focus"] and st["c"]["text"] == "custom teal", st)
+    C.check("cancelling the dialog also leaves the text exactly as it was (and the setting)", st["editing"] and st["focus"] and st["c"]["text"] == "custom teal" and st["typing"]["c"] == "#00796b", st)
 
     # ---- 7. undo: a colour change is its own undo step
     kb.press("Control+a"); pick(13); kb.press("Control+z"); a.page.wait_for_timeout(100)
@@ -156,7 +163,7 @@ with sync_playwright() as pw:
     a.ev("() => { const p = noteflow.panels.nb; p.selected = null; p.setTool('text'); }")
 
     # ---- 10. Persian / English / mixed: colours per piece, drawn in those colours, bidi intact
-    a.click_page(300, 100); kb.type("سلام "); pick(8); kb.type("دنیا"); pick(13); kb.type(" hello"); pick(9); kb.type(" جهان")
+    reset(); a.click_page(300, 100); kb.type("سلام "); pick(8); kb.type("دنیا"); pick(13); kb.type(" hello"); pick(9); kb.type(" جهان")
     r = runs(a)
     C.check("Persian + English text with several colours: runs match what was typed",
             [x["s"] for x in r] == ["سلام ", "دنیا", " hello", " جهان"] and [x.get("c") for x in r] == [None, RED, BLUE, "#f57c00"], r)
