@@ -12,7 +12,7 @@
 // If the PDF is replaced by a different file its hash no longer matches: the link says so instead of silently pointing at the wrong page.
 // Links are kept in ONE list (not inside the items), so a connection is found from either end, any number of links can meet at one item /
 // page / region, and the notebook / PDF files themselves stay exactly as they were. The list is written to the workspace as links.json.
-export const LINKS_FORMAT = "NoteFlow-links", LINKS_VERSION = 1, MAX_LINKS = 20000, MAX_REJECTS = 3000;
+export const LINKS_FORMAT = "NoteFlow-links", LINKS_VERSION = 1, MAX_LINKS = 20000, MAX_REJECTS = 3000, MAX_GRAVE = 500;
 // A link made by the user has no src. src "suggested" = Smart linking proposed it and the user confirmed it; src "auto" = Smart linking made it on its own
 // (only when the user turned that on); score = the similarity (0..1) it was proposed with. rejects = suggestions the user said are not related (kept, so they do not come back).
 const SLOTS = ["pdf", "pdf2", "nb", "nb2", "board", "board2"];
@@ -51,7 +51,9 @@ export const sameAnchor = (a, b) => sig(a) === sig(b);
 export const anchorShape = (a) => (a.k === "item" ? "item" : a.quote ? "text" : a.rect ? "region" : "page");
 
 export class LinkStore {
-  constructor() { this.links = new Map(); this.index = new Map(); this.version = 0; this.listeners = new Set(); this.rejects = new Set(); }
+  constructor() { this.links = new Map(); this.index = new Map(); this.version = 0; this.listeners = new Set(); this.rejects = new Set(); this.grave = new Map(); }
+  /** Number of links waiting in memory for an Undo of the deletion that removed them (see prune; never saved). */
+  get graveSize() { return this.grave.size; }
   get size() { return this.links.size; }
   onChange(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   emit() { this.version++; for (const f of this.listeners) { try { f(this); } catch (e) { console.warn(e); } } }
@@ -71,14 +73,45 @@ export class LinkStore {
     this.links.set(link.id, link);
     for (const k of new Set([anchorKey(link.a), anchorKey(link.b)])) { let s = this.index.get(k); if (!s) this.index.set(k, (s = new Set())); s.add(link.id); }
   }
+  /** Take a link out of the list and the index (no notification). */
+  detach(l) {
+    this.links.delete(l.id);
+    for (const k of new Set([anchorKey(l.a), anchorKey(l.b)])) { const s = this.index.get(k); if (s) { s.delete(l.id); if (!s.size) this.index.delete(k); } }
+  }
   remove(id) {
     const l = this.links.get(id);
     if (!l) return false;
-    this.links.delete(id);
-    for (const k of new Set([anchorKey(l.a), anchorKey(l.b)])) { const s = this.index.get(k); if (s) { s.delete(id); if (!s.size) this.index.delete(k); } }
+    this.detach(l); this.grave.delete(id);
     this.emit(); return true;
   }
-  clear() { if (!this.links.size && !this.rejects.size) return; this.links.clear(); this.index.clear(); this.rejects.clear(); this.emit(); }
+  clear() { if (!this.links.size && !this.rejects.size && !this.grave.size) return; this.links.clear(); this.index.clear(); this.rejects.clear(); this.grave.clear(); this.emit(); }
+  /**
+   * Keep the links consistent with the content: a link whose end no longer exists is DELETED, so there are never orphaned links (nobody has to look for them).
+   *   hasItem(id) -> true while the item (text box, note, node, drawing, highlight ...) is still somewhere in the workspace
+   *   hasDoc(hash) -> true while that PDF is open; pass null to leave PDF ends alone (a PDF that is still being opened has no identity yet)
+   * The links are lost for good, and so they are not saved: the workspace file never holds one. One exception, only in memory: a link removed because an ITEM
+   * was deleted is kept aside, and comes back if that item comes back (Undo of the deletion). A link removed because its PDF went is never kept.
+   * -> { removed: [link], revived: [link] }
+   */
+  prune({ hasItem, hasDoc = null }) {
+    const itemGone = (x) => x.k === "item" && !hasItem(x.id), docGone = (x) => !!hasDoc && x.k === "pdf" && !hasDoc(x.doc);
+    const removed = [], revived = [];
+    for (const l of [...this.links.values()]) {
+      const byItem = itemGone(l.a) || itemGone(l.b), byDoc = docGone(l.a) || docGone(l.b);
+      if (!byItem && !byDoc) continue;
+      this.detach(l); removed.push(l);
+      if (byItem && !byDoc) { if (this.grave.size >= MAX_GRAVE) this.grave.delete(this.grave.keys().next().value); this.grave.set(l.id, l); }
+    }
+    for (const [id, l] of [...this.grave]) {
+      if (itemGone(l.a) || itemGone(l.b)) continue;                                       // still deleted: keep waiting
+      this.grave.delete(id);
+      if (docGone(l.a) || docGone(l.b) || this.links.has(id) || this.links.size >= MAX_LINKS) continue;
+      if (this.forKey(anchorKey(l.a)).some((o) => (sameAnchor(o.a, l.a) && sameAnchor(o.b, l.b)) || (sameAnchor(o.a, l.b) && sameAnchor(o.b, l.a)))) continue;    // (made again meanwhile)
+      this.put(l); revived.push(l);
+    }
+    if (removed.length || revived.length) this.emit();
+    return { removed, revived };
+  }
   /** Remember that a suggestion (its key, see smartlink.js) is not wanted. */
   reject(key) { if (this.rejects.size >= MAX_REJECTS) this.rejects.delete(this.rejects.values().next().value); this.rejects.add(String(key).slice(0, 80)); }
   isRejected(key) { return this.rejects.has(key); }
@@ -100,7 +133,7 @@ export class LinkStore {
   }
   /** Replace everything by the links of a saved list (invalid entries are dropped, nothing throws). Returns how many were dropped. */
   load(raw) {
-    this.links.clear(); this.index.clear(); this.rejects.clear();
+    this.links.clear(); this.index.clear(); this.rejects.clear(); this.grave.clear();
     let data = raw, dropped = 0;
     if (typeof raw === "string") { try { data = JSON.parse(raw); } catch { data = null; } }
     const list = data && data.format === LINKS_FORMAT && Array.isArray(data.links) ? data.links : [];

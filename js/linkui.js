@@ -37,6 +37,24 @@ export class LinkController {
   }
   /** Something that links can depend on changed (content edited, a PDF opened ...). */
   touch() { this.rev++; }
+  /**
+   * Delete every link whose end is gone: an item that was deleted (on any page of any panel: notebooks, boards, PDF annotations), a PDF that was closed or replaced.
+   * Called after every change of content and whenever a PDF is opened or closed, so a link never outlives what it connects. Not while a workspace is being loaded
+   * (the panels are filled one after the other; the app sweeps once when it is done, which also cleans up files that were saved with such links).
+   * -> the number of links deleted
+   */
+  sweep() {
+    const st = this.store, app = this.app;
+    if (app.restoring || (!st.size && !st.graveSize)) return 0;
+    const ids = new Set(), docs = new Set(); let opening = false;
+    for (const p of Object.values(app.panels)) {
+      for (const pg of p.pages || []) for (const id of idsOf(pg.items)) ids.add(id);
+      if (p.kind === "pdf" && p.pdf) { if (p.pdf.hash) docs.add(p.pdf.hash); else opening = true; }       // (a PDF without identity yet: leave the PDF ends alone for now)
+    }
+    const res = st.prune({ hasItem: (id) => ids.has(id), hasDoc: opening ? null : (h) => docs.has(h) });
+    if (res.removed.length || res.revived.length) app.scheduleAutosave();
+    return res.removed.length;
+  }
   renderAll() { for (const p of Object.values(this.app.panels)) p.render(); }
 
   // ------------------------------------------------------------ resolving

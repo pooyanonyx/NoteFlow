@@ -14,7 +14,13 @@ import { normalize } from "./textnorm.js";
 import { el, icon, toast } from "./ui.js";
 
 export const MODES = [["off", "Off"], ["suggest", "Suggest links (I confirm)"], ["auto", "Suggest, and link on their own when very sure"]];
-export const SUGGEST_AT = 0.55, AUTO_AT = 0.88, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, MAX_AUTO_PER_SCAN = 3, POLL_MS = 1500;
+// SUGGEST_AT: from this score a match is offered. AUTO_AT: from this score (and with the two extra conditions of isConfident) the third mode links on its own.
+// Calibrated on pairs of notes and passages (tests/unit/similar.test.mjs): different facts about the same topic, or loose overlaps of vocabulary, score at most ~.53;
+// real rewordings (same statement in other words) score .70 to 1. AUTO_AT sits in that gap, so a link is made when the match is clear, not only when it is near-verbatim.
+export const SUGGEST_AT = 0.55, AUTO_AT = 0.70, AUTO_MIN_WORDS = 4, AUTO_MARGIN = 0.12, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
+/** May this match be linked without asking? A high enough score, at least AUTO_MIN_WORDS words that match exactly (not only by their beginnings), and clearly
+ *  ahead of the next best, different place (a passage that fits two places about equally is left to the user). c: { score, exact, second } */
+export const isConfident = (c) => !!c && c.score >= AUTO_AT && (c.exact || 0) >= AUTO_MIN_WORDS && c.score - (c.second || 0) >= AUTO_MARGIN;
 const MAX_TEXT_UNITS = 120, MAX_ITEM_TEXT = 2000, MAX_PDF_TEXT = 40000;
 
 const hash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
@@ -37,7 +43,7 @@ export class SmartLink {
     if (!MODES.some(([m]) => m === mode)) mode = "off";
     this.mode = mode; clearInterval(this.timer); this.timer = 0; this.scannedSig = this.seenSig = null;          // (turning it on looks at the pages that are on screen now)
     if (mode === "off") { this.suggestions = []; this.report = null; this.seenSig = this.scannedSig = null; this.draw(); }
-    else { this.timer = setInterval(() => this.poll(), POLL_MS); if (!silent) toast(mode === "auto" ? "Smart linking is on: very close matches are linked automatically, the others are suggested." : "Smart linking is on: close matches are suggested, you confirm them."); }
+    else { this.timer = setInterval(() => this.poll(), POLL_MS); if (!silent) toast(mode === "auto" ? "Smart linking is on: clear matches are linked automatically, weaker ones are suggested." : "Smart linking is on: close matches are suggested, you confirm them."); }
     this.app.scheduleAutosave && this.app.scheduleAutosave();
   }
 
@@ -124,10 +130,10 @@ export class SmartLink {
         for (const r of res) { const sg = this.makeSuggestion(A, B, r); if (sg) found.push(sg); }
       }
       found.sort((a, b) => b.score - a.score);
-      this.suggestions = found.slice(0, MAX_SUGGESTIONS);
+      const made = this.mode === "auto" ? await this.autoLink(found) : { n: 0, left: found };      // third mode: confident matches are linked right here, before anything is shown
+      this.suggestions = made.left.slice(0, MAX_SUGGESTIONS);                                      // (what is left: weaker matches, to be confirmed by the user)
       this.scannedSig = sig; this.seenSig = sig;
-      this.report = { manual, surfaces: sf.map((s) => s.label), notes, none: !this.suggestions.length };
-      if (this.mode === "auto") this.autoLink();
+      this.report = { manual, surfaces: sf.map((s) => s.label), notes, none: !this.suggestions.length, linked: made.n };
       this.draw();
     } catch (e) { console.warn("Smart linking:", e); this.scannedSig = sig; }
     finally {
@@ -149,46 +155,62 @@ export class SmartLink {
       if (target.kind === "pdf" && o.k === "pdf" && o.doc === B.panel.pdf.hash && o.page === B.page) return null;
       if (target.kind === "item" && o.k === "item" && pass.item.id && o.id === pass.item.id) return null;
     }
-    return { key, score: r.score, shared: r.shared, from: { panel: A.panel, page: A.page, item: n.item, text }, to: target, toText: targetText, noteText: text, shown: false };
+    return { key, score: r.score, exact: r.exact, second: r.second, shared: r.shared, from: { panel: A.panel, page: A.page, item: n.item, text }, to: target, toText: targetText, noteText: text, shown: false };
   }
 
   // ------------------------------------------------------------ making links
-  /** Make the link of a suggestion. -> true when made */
-  accept(sg, { auto = false } = {}) {
+  /** Make the link of a suggestion. -> "made" | "exists" (that connection is already there) | "stale" (the note or the PDF is not what it was) | "failed" */
+  link(sg, { auto = false } = {}) {
     const LK = this.app.links, pa = sg.from.panel, items = pa.pages[sg.from.page] && pa.pages[sg.from.page].items, idx = items ? items.indexOf(sg.from.item) : -1;
-    if (idx < 0) { this.drop(sg); toast("That note has changed since it was suggested."); return false; }
+    if (idx < 0) return "stale";
     const a = LK.itemAnchor(pa, idx, sg.from.page);
     let b;
     if (sg.to.kind === "pdf") {
-      b = { k: "pdf", doc: sg.to.panel.pdf.hash, name: sg.to.panel.name || "", page: sg.to.page, pv: clip(sg.toText, 80), quote: { text: clip(sg.toText, 400), rects: sg.rects || [] } };
+      const pdf = sg.to.panel.pdf;
+      if (!pdf || !pdf.hash) return "stale";                                  // (the PDF was closed or replaced while the scan ran)
+      b = { k: "pdf", doc: pdf.hash, name: sg.to.panel.name || "", page: sg.to.page, pv: clip(sg.toText, 80), quote: { text: clip(sg.toText, 400), rects: sg.rects || [] } };
     } else {
-      const tp = sg.to.panel, ti = tp.pages[sg.to.page].items.indexOf(sg.to.item);
-      if (ti < 0) { this.drop(sg); return false; }
+      const tp = sg.to.panel, ti = tp.pages[sg.to.page] ? tp.pages[sg.to.page].items.indexOf(sg.to.item) : -1;
+      if (ti < 0) return "stale";
       b = LK.itemAnchor(tp, ti, sg.to.page);
     }
-    if (!a || !b) return false;
+    if (!a || !b) return "failed";
     const res = this.store.add(a, b, { src: auto ? "auto" : "suggested", score: sg.score });
-    this.drop(sg);
-    if (!res) return false;
+    if (!res) return "failed";
     for (const p of [pa, sg.to.panel]) { p.dirty = true; p.ui(); }
     this.app.scheduleAutosave();
-    return res.created;
+    return res.created ? "made" : "exists";
+  }
+  /** Make the link of a suggestion the user confirmed (or of any suggestion). -> true when made */
+  accept(sg, { auto = false } = {}) {
+    const r = this.link(sg, { auto });
+    this.drop(sg);
+    if (r === "stale") toast("That note has changed since it was suggested.");
+    return r === "made";
   }
   async attachRects(sg) {                                                    // the boxes of a PDF passage (for drawing the quote on the page)
     if (sg.to.kind !== "pdf" || sg.rects) return;
     try { const data = await pageTextData(sg.to.panel.pdf.doc, sg.to.page); sg.rects = rectsForRange(data, sg.to.s, sg.to.e).slice(0, 40); } catch { sg.rects = []; }
   }
-  async autoLink() {
-    let n = 0;
-    for (const sg of [...this.suggestions]) {
-      if (n >= MAX_AUTO_PER_SCAN) break;
-      if (sg.score < AUTO_AT) continue;
+  /** Third mode: link, on the spot and without asking, every match that isConfident; nothing else is linked. Weaker matches are returned for the card.
+   *  A match that is already linked, or whose note / PDF changed since the scan, is skipped quietly. -> { n: links made, left: the matches that were not linked } */
+  async autoLink(found) {
+    const left = [], made = [];
+    for (const sg of found) {
+      if (this.mode !== "auto" || made.length >= MAX_AUTO_PER_SCAN || !isConfident(sg)) { left.push(sg); continue; }
       await this.attachRects(sg);
-      if (this.accept(sg, { auto: true })) { n++; toast(`Linked automatically (${Math.round(sg.score * 100)}% match): “${clip(sg.noteText, 40)}” ↔ ${sg.to.kind === "pdf" ? `${sg.to.panel.name || "PDF"} p. ${sg.to.page + 1}` : "another note"}. See Links to review.`, 5000); }
+      if (this.mode !== "auto") { left.push(sg); continue; }                  // (turned off while the text of the PDF page was read)
+      const r = this.link(sg, { auto: true });
+      if (r === "made") made.push(sg); else if (r === "failed") left.push(sg);
     }
-    this.draw();
+    if (made.length) {
+      const one = made[0], where = (sg) => (sg.to.kind === "pdf" ? `${sg.to.panel.name || "PDF"} p. ${sg.to.page + 1}` : "another note");
+      toast(made.length === 1 ? `Linked automatically (${Math.round(one.score * 100)}% match): “${clip(one.noteText, 40)}” ↔ ${where(one)}. See Links to review.`
+        : `Linked ${made.length} pairs automatically (from ${Math.round(Math.min(...made.map((x) => x.score)) * 100)}% match). See Links to review.`, 5000);
+    }
+    return { n: made.length, left };
   }
-  drop(sg) { this.suggestions = this.suggestions.filter((x) => x !== sg); this.draw(); }
+  drop(sg) { const n = this.suggestions.length; this.suggestions = this.suggestions.filter((x) => x !== sg); if (this.suggestions.length !== n) this.draw(); }
   async confirm(sg) { await this.attachRects(sg); if (this.accept(sg)) toast("Linked. It is marked as a suggested link."); }
   reject(sg) { this.store.reject(sg.key); this.drop(sg); this.app.scheduleAutosave(); }
   /** "Not now" for everything shown: they are not offered again in this session. */
@@ -210,7 +232,7 @@ export class SmartLink {
     const head = (t, closeFn) => el("div", { class: "schead" }, icon("chain"), el("b", {}, t), el("button", { class: "btn small", type: "button", title: "Not now", "aria-label": "Close", onclick: closeFn }, icon("close")));
     if (!list.length) {
       this.card.replaceChildren(head("Smart linking", () => { this.report = null; this.draw(); }),
-        el("p", { class: "scmsg" }, "No strong match found between the pages you are looking at."),
+        el("p", { class: "scmsg" }, rep.linked ? `${rep.linked} link${rep.linked === 1 ? " was" : "s were"} made automatically between the pages you are looking at. See Links to review.` : "No strong match found between the pages you are looking at."),
         el("p", { class: "scsmall" }, "Compared: " + (rep.surfaces.join("  ↔  ") || "nothing (open two panels)") + "."),
         ...rep.notes.map((n) => el("p", { class: "scsmall warn" }, n)),
         el("p", { class: "scsmall" }, "Only typed text is compared, and only on these pages. Handwriting, images and PDF pages without selectable text cannot be analyzed."));

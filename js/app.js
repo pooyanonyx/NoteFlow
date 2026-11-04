@@ -47,7 +47,7 @@ export class App {
       nb: new Panel(this, "nb", "nb", "Notebook"), nb2: new Panel(this, "nb2", "nb", "Notebook 2"),
       board: new Panel(this, "board", "board", "Board"), board2: new Panel(this, "board2", "board", "Board 2") };
     this._partIds = new WeakMap(); this._written = new Set();
-    this.autosaveOk = true; this.autosaveTimer = 0; this.wsName = null; this.installEvt = null;
+    this.autosaveOk = true; this.restoring = false; this.autosaveTimer = 0; this.wsName = null; this.installEvt = null;
     setImageLoadedCallback(() => { for (const p of Object.values(this.panels)) p.render(); });
     // the bundled Persian font is used by the canvas too: redraw once it has loaded
     document.fonts?.addEventListener?.("loadingdone", () => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); });         // text is measured again with the real font
@@ -339,7 +339,7 @@ export class App {
   // ----------------------------------------------------------- workspace
   onChange(panel, info = {}) {
     if (info.clean) panel.ui();
-    this.links.touch(); this.search.contentChanged();
+    this.links.touch(); this.links.sweep(); this.search.contentChanged();          // (sweep: links whose item was deleted are deleted with it)
     this.scheduleAutosave();
   }
   /** The Link button (top bar): linking starts from what is selected in the active panel; when that panel has nothing selected but exactly one other visible panel has, from that one. */
@@ -350,7 +350,7 @@ export class App {
     this.links.start(src || this.panels[this.order[0]]);
   }
   /** A document was opened / closed (a PDF): links and search look at it again. */
-  docsChanged() { this.links.touch(); this.links.renderAll(); this.search.contentChanged(); if (this.search.open) this.search.watchPdfs(); }
+  docsChanged() { this.links.touch(); this.links.sweep(); this.links.renderAll(); this.search.contentChanged(); if (this.search.open) this.search.watchPdfs(); }
   /** Make sure the panel can be seen (a link or a search result lives there): it is added to the layout when the layout does not have it, and on a narrow screen its tab is opened. */
   async revealPanel(key, from = null) {
     if (!this.order.includes(key)) {
@@ -415,8 +415,14 @@ export class App {
     } catch (e) { toast(e.message || "Could not open this workspace.", 5000); return false; }
     finally { busy.done(); }
   }
-  /** Rebuild all four panels from workspace data (validated by readWorkspace). */
+  /** Rebuild all panels from workspace data (validated by readWorkspace). While it runs, links are left alone (the panels are filled one by one); afterwards links
+   *  whose ends are not in the workspace are deleted (a file saved by an older version may hold some). If it fails half way, nothing is deleted. */
   async restore(ws) {
+    this.restoring = true; let ok = false;
+    try { await this.applyWorkspace(ws); ok = true; } finally { this.restoring = false; }
+    if (ok) this.links.sweep();
+  }
+  async applyWorkspace(ws) {
     const P = this.panels, st = ws.settings || {}, win = st.window && typeof st.window === "object" ? st.window : {};
     this.links.cancel(); this.links.store.load(ws.links || null);                  // (a workspace without links has none: links never leak from the one that was open before)
     const pdfs = [["pdf", ws.pdf, st.pdf], ["pdf2", ws.pdf2, st.pdf2]];

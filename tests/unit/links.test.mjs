@@ -82,3 +82,54 @@ test("rejected suggestions are remembered, saved, bounded and cleared with the l
   s.clear(); assert.equal(s.rejects.size, 0);
   assert.equal("rejects" in new LinkStore().toJSON(), false);                                                       // nothing to keep: nothing written
 });
+
+// ---------------------------------------------------------------- orphaned links are deleted (the data model keeps itself consistent)
+const alive = (ids, docs = null) => ({ hasItem: (id) => ids.includes(id), hasDoc: docs ? (h) => docs.includes(h) : null });
+test("prune: deleting an item deletes its links, whichever end it was (note -> PDF, note -> note); the others stay", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(3)); s.add(page(5), item("n2")); s.add(item("n3"), item("n4")); s.add(item("n1"), item("n4"));
+  const r = s.prune(alive(["n2", "n3", "n4"]));                                  // n1 was deleted
+  assert.equal(r.removed.length, 2); assert.equal(s.size, 2);
+  assert.equal(s.forItem("n1").length, 0); assert.equal(s.forPdfPage(H1, 3).length, 0);              // the index is clean too: nothing points at a removed link
+  assert.equal(s.forItem("n4").length, 1); assert.equal(s.forPdfPage(H1, 5).length, 1);
+  assert.equal(s.prune(alive(["n2", "n3", "n4"])).removed.length, 0);                          // nothing to do the second time
+  const r2 = s.prune(alive(["n2"]));                                                    // n3 and n4 deleted
+  assert.equal(r2.removed.length, 1); assert.equal(s.size, 1);
+});
+test("prune: a PDF that is no longer open takes the links to it along (page, region and quote links alike); links to another PDF stay", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(1)); s.add(item("n2"), page(2, { rect: [1, 1, 9, 9] })); s.add(item("n3"), page(3, { quote: { text: "hello", rects: [] } }, H2)); s.add(item("n1"), item("n2"));
+  const r = s.prune(alive(["n1", "n2", "n3"], [H2]));
+  assert.equal(r.removed.length, 2); assert.equal(s.size, 2); assert.equal(s.forPdfPage(H1, 1).length, 0); assert.equal(s.forPdfPage(H2, 3).length, 1);
+});
+test("prune: with hasDoc = null the PDF ends are left alone (a PDF that is still being opened)", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(1)); assert.equal(s.prune(alive(["n1"])).removed.length, 0); assert.equal(s.size, 1);
+});
+test("prune tells the listeners once, and only when something changed", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(1)); s.add(item("n2"), page(2)); let n = 0; s.onChange(() => n++);
+  s.prune(alive(["n1", "n2"])); assert.equal(n, 0);
+  s.prune(alive([])); assert.equal(n, 1); assert.equal(s.size, 0);
+});
+test("undo of a deletion brings the link back (in memory only); a link lost with its PDF never comes back", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(1)); s.add(item("n2"), page(2));
+  s.prune(alive(["n2"]), null); assert.equal(s.size, 1); assert.equal(s.graveSize, 1);
+  const r = s.prune(alive(["n1", "n2"])); assert.equal(r.revived.length, 1); assert.equal(s.size, 2); assert.equal(s.graveSize, 0);    // (the note is back)
+  s.prune(alive(["n2"])); s.prune(alive(["n1", "n2"]));                                      // delete, undo, ... as often as you like
+  assert.equal(s.size, 2);
+  const t = new LinkStore(); t.add(item("n1"), page(1));
+  t.prune(alive(["n1"], [H2])); assert.equal(t.size, 0); assert.equal(t.graveSize, 0);          // PDF gone: gone for good
+  t.prune(alive(["n1"], [H1])); assert.equal(t.size, 0);
+});
+test("a link made again while the first one waited for an Undo is not doubled; a manual removal and load() empty the waiting list", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(1)); s.prune(alive([]));
+  s.add(item("n1"), page(1)); assert.equal(s.size, 1);                                          // the same connection, made again by hand
+  s.prune(alive(["n1"])); assert.equal(s.size, 1); assert.equal(s.graveSize, 0);
+  s.prune(alive([])); assert.equal(s.graveSize, 1); s.load(null); assert.equal(s.graveSize, 0);
+  const u = new LinkStore(); u.add(item("n1"), page(1)); u.prune(alive([])); u.clear(); assert.equal(u.graveSize, 0);
+});
+test("a link that was removed for a deleted item is not saved: save -> load gives no orphan", () => {
+  const s = new LinkStore(); s.add(item("n1"), page(1)); s.add(item("n2"), page(2)); s.prune(alive(["n2"]));
+  const t = new LinkStore(); t.load(JSON.parse(JSON.stringify(s.toJSON()))); assert.equal(t.size, 1); assert.equal(t.forItem("n1").length, 0); assert.equal(t.graveSize, 0);
+});
+test("the waiting list is bounded", () => {
+  const s = new LinkStore(); for (let i = 0; i < 520; i++) s.add(item("x" + i), page(i % 50 + 1000, {}, H1) );
+  s.prune(alive([])); assert.ok(s.graveSize <= 500);
+});
