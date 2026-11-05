@@ -9,18 +9,24 @@
 // never in several at once; the amount of text read is capped; it works in small slices; a slow scan makes the next ones wait longer.
 import * as M from "./model.js";
 import { pageTextData, rectsForRange } from "./pdftext.js";
-import { passagesOf, noteUnits, findMatches } from "./similar.js";
+import { RARITY_MIN_PASSAGES, passagesOf, noteUnits, findMatches } from "./similar.js";
 import { normalize } from "./textnorm.js";
 import { el, icon, toast } from "./ui.js";
 
-export const MODES = [["off", "Off"], ["suggest", "Suggest links (I confirm)"], ["auto", "Suggest, and link on their own when very sure"]];
-// SUGGEST_AT: from this score a match is offered. AUTO_AT: from this score (and with the two extra conditions of isConfident) the third mode links on its own.
-// Calibrated on pairs of notes and passages (tests/unit/similar.test.mjs): different facts about the same topic, or loose overlaps of vocabulary, score at most ~.53;
-// real rewordings (same statement in other words) score .70 to 1. AUTO_AT sits in that gap, so a link is made when the match is clear, not only when it is near-verbatim.
-export const SUGGEST_AT = 0.55, AUTO_AT = 0.70, AUTO_MIN_WORDS = 4, AUTO_MARGIN = 0.12, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
-/** May this match be linked without asking? A high enough score, at least AUTO_MIN_WORDS words that match exactly (not only by their beginnings), and clearly
- *  ahead of the next best, different place (a passage that fits two places about equally is left to the user). c: { score, exact, second } */
-export const isConfident = (c) => !!c && c.score >= AUTO_AT && (c.exact || 0) >= AUTO_MIN_WORDS && c.score - (c.second || 0) >= AUTO_MARGIN;
+export const MODES = [["off", "Off"], ["suggest", "Suggest links (I confirm)"], ["auto", "Suggest, and link on their own when confident"]];
+// SUGGEST_AT: from this score a match is offered as a suggestion (both modes). AUTO_AT: from this score, and with the extra conditions of isConfident, the third mode links
+// on its own; everything between the two is only suggested, never linked.
+// Calibrated on labelled notes in English and Persian (tests/unit/smartlink-corpus.mjs, checked on tests/unit/smartlink-holdout.mjs; `node tools/calibrate-smartlink.mjs`):
+// real rewordings of the same statement score .55 to 1.00 (about 85% of them), heavier rewordings .30 to .55; notes about another fact of the same topic score up to ~.54;
+// notes that only share ordinary words with a passage, or are unrelated, score .30 or less (at .50 notes that merely sit on the same subject start to be linked, below .30 junk suggestions start). (The scorer knows synonyms, word forms and Persian verb forms, so the
+// numbers are not comparable to the earlier, purely literal ones: .70 then selected near-copies only.)
+// On a page with fewer than RARITY_MIN_PASSAGES passages (a slide, a caption) there is nothing to tell distinctive words from ordinary ones, every score is inflated
+// (notes about another fact of the same topic reach .74 there), so automatic links need AUTO_AT_SMALL; suggestions are unaffected.
+export const SUGGEST_AT = 0.30, AUTO_AT = 0.55, AUTO_MIN_EXACT = 2, AUTO_MIN_WORDS = 3, AUTO_MARGIN = 0.10, AUTO_AT_SMALL = 0.70, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
+/** May this match be linked without asking? A high enough score; at least AUTO_MIN_EXACT words found as written (so it is never only a lookalike of synonyms); at least
+ *  AUTO_MIN_WORDS words found as written or as a word of the same meaning (so it is never two words in common); and clearly ahead of the next best, different place
+ *  (a passage that fits two places about equally is left to the user); and no clash of numbers ("type 1" against "type 2"). c: { score, exact, syn, second, clash } */
+export const isConfident = (c) => !!c && !c.clash && c.score >= (c.pool !== undefined && c.pool < RARITY_MIN_PASSAGES ? AUTO_AT_SMALL : AUTO_AT) && (c.exact || 0) >= AUTO_MIN_EXACT && (c.exact || 0) + (c.syn || 0) >= AUTO_MIN_WORDS && c.score - (c.second || 0) >= AUTO_MARGIN - 1e-9;
 const MAX_TEXT_UNITS = 120, MAX_ITEM_TEXT = 2000, MAX_PDF_TEXT = 40000;
 
 const hash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
@@ -73,7 +79,7 @@ export class SmartLink {
       if ((d.t !== "text" && d.t !== "note" && d.t !== "node") || typeof d.text !== "string" || !d.text.trim()) continue;
       if (visible) { const b = panel.boundsOf(d); if (b[2] < visible[0] || b[0] > visible[2] || b[3] < visible[1] || b[1] > visible[3]) continue; }
       const text = d.text.slice(0, MAX_ITEM_TEXT);
-      for (const u of noteUnits(text)) out.push({ item: d, panel, page, text: text.slice(u.s, u.e), s: u.s, e: u.e, toks: u.toks });
+      for (const u of noteUnits(text)) out.push({ item: d, panel, page, text: text.slice(u.s, u.e), s: u.s, e: u.e, toks: u.toks, nums: u.nums });
     }
     return out;
   }
@@ -130,6 +136,11 @@ export class SmartLink {
         for (const r of res) { const sg = this.makeSuggestion(A, B, r); if (sg) found.push(sg); }
       }
       found.sort((a, b) => b.score - a.score);
+      const one = new Set();                                                                       // one suggestion (or link) per note and place: a note of several lines that matches the same PDF page / note with
+      for (let i = 0; i < found.length; i++) {                                                     // several of its lines is offered once (its best match), never as a pile of near-duplicates
+        const sg = found[i], k = `${arrId(sg.from.item)}>${sg.to.kind === "pdf" ? "pdf:" + sg.to.panel.pdf.hash.slice(0, 12) + ":" + sg.to.page : "item:" + arrId(sg.to.item)}`;
+        if (one.has(k)) found.splice(i--, 1); else one.add(k);
+      }
       const made = this.mode === "auto" ? await this.autoLink(found) : { n: 0, left: found };      // third mode: confident matches are linked right here, before anything is shown
       this.suggestions = made.left.slice(0, MAX_SUGGESTIONS);                                      // (what is left: weaker matches, to be confirmed by the user)
       this.scannedSig = sig; this.seenSig = sig;
@@ -155,7 +166,7 @@ export class SmartLink {
       if (target.kind === "pdf" && o.k === "pdf" && o.doc === B.panel.pdf.hash && o.page === B.page) return null;
       if (target.kind === "item" && o.k === "item" && pass.item.id && o.id === pass.item.id) return null;
     }
-    return { key, score: r.score, exact: r.exact, second: r.second, shared: r.shared, from: { panel: A.panel, page: A.page, item: n.item, text }, to: target, toText: targetText, noteText: text, shown: false };
+    return { key, score: r.score, exact: r.exact, syn: r.syn, fuzzy: r.fuzzy, clash: r.clash, pool: r.pool, second: r.second, shared: r.shared, from: { panel: A.panel, page: A.page, item: n.item, text }, to: target, toText: targetText, noteText: text, shown: false };
   }
 
   // ------------------------------------------------------------ making links

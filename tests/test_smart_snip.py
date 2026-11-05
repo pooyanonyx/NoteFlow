@@ -114,27 +114,27 @@ with sync_playwright() as pw:
     n3 = P("() => noteflow.smart.stats.scans"); P("async () => { await noteflow.panels.pdf.goto(3); await noteflow.panels.pdf.goto(19); }"); a.page.wait_for_timeout(4500)
     C.check("turning it off clears the suggestions and stops all scanning", P("() => noteflow.smart.stats.scans") == n3 and P("() => noteflow.smart.suggestions.length") == 0 and P("() => noteflow.smart.card.hidden") and P("() => noteflow.smart.timer") == 0)
 
-    # ---- auto mode: only very high confidence links on its own; the paraphrase stays a suggestion; auto links are marked and removable
+    # ---- auto mode: links on its own when confident (page 20 has a single sentence, so the stricter bar for tiny pages, .70, applies); weaker matches stay suggestions; auto links are marked and removable
     P("async ([n]) => { const pdf = noteflow.panels.pdf; noteflow.links.store.clear(); const nb = noteflow.panels.nb; await nb.goto(99); nb.commit([...nb.items, { t: 'text', x: 60, y: 300, text: 'The TCP handshake takes three steps: client sends SYN, server replies SYN-ACK, client confirms with ACK', color: '#1a1a1a', size: 16 }]); await pdf.goto(7); }", [NOTE])
     P("() => { noteflow.smart.snoozed.clear(); noteflow.smart.scannedSig = null; noteflow.smart.seenSig = null; noteflow.smart.setMode('auto', { silent: true }); }")
     until("() => noteflow.links.store.countSrc('auto') >= 1")
     L = [l for l in P("() => noteflow.links.store.toJSON().links") if l.get("src") == "auto"]
     C.check("auto mode: a near-verbatim match is linked on its own, marked 'auto' with its confidence", len(L) >= 1 and L[0]["score"] >= 0.70 and L[0]["b"]["page"] == 7, L)
     C.check("auto mode: what was linked is never shown as a suggestion (no card, no question)", P("() => noteflow.smart.suggestions.length") == 0 and P("() => noteflow.smart.card.hidden"), P("() => noteflow.smart.suggestions.length"))
-    # the paraphrase of page 20 (match ~72%) used to be only suggested because the bar was 88%: it is clearly the same statement, so it is linked on its own now
+    # the paraphrase of page 20 is clearly the same statement (synonyms and word forms are recognised, ~94%), so it is linked on its own
     P("async () => { await noteflow.panels.pdf.goto(19); }")
     until("() => noteflow.links.store.all().some((l) => l.b.page === 19)")
     L19 = [l for l in P("() => noteflow.links.store.toJSON().links") if l["b"]["page"] == 19]
-    C.check("…and a clear paraphrase (page 20, ~72% match) is linked on its own too, marked 'auto' with its score", len(L19) >= 1 and all(l.get("src") == "auto" and 0.70 <= l["score"] < 0.88 for l in L19), L19)
+    C.check("…and a clear paraphrase (page 20, ~94% match) is linked on its own too, marked 'auto' with its score", len(L19) >= 1 and all(l.get("src") == "auto" and 0.70 <= l["score"] <= 1 for l in L19), L19)
     a.page.wait_for_timeout(600)
     C.check("…without any suggestion or confirmation", P("() => noteflow.smart.suggestions.length") == 0 and P("() => noteflow.smart.card.hidden"))
     nA = P("() => noteflow.links.store.size")
-    # a weaker, merely related note (match ~65%, below the bar): NOT linked, only suggested for the user to confirm
+    # a weaker, merely related restatement (match ~65%, below the .70 bar of a one-sentence page): NOT linked, only suggested for the user to confirm
     WEAK = "TCP connection setup: client sends SYN, server answers with SYN-ACK, hosts exchange segments afterwards"
     P("([t]) => { const nb = noteflow.panels.nb; nb.commit([...nb.items, { t: 'text', x: 60, y: 340, text: t, color: '#1a1a1a', size: 16 }]); }", [WEAK])
     until("() => noteflow.smart.suggestions.length >= 1 && noteflow.smart.suggestions.some((s) => s.noteText.startsWith('TCP connection setup'))")
     wk = [s for s in P("() => noteflow.smart.suggestions.map((s) => ({ t: s.noteText, score: s.score, page: s.to.page }))") if s["t"].startswith("TCP connection setup")][0]
-    C.check("auto mode: a weaker match is only suggested (score between the suggestion and the auto bar), and no link is made for it", 0.55 <= wk["score"] < 0.70 and wk["page"] == 19 and P("() => noteflow.links.store.size") == nA, wk)
+    C.check("auto mode: a weaker match is only suggested (score between the suggestion and the auto bar), and no link is made for it", 0.30 <= wk["score"] < 0.70 and wk["page"] == 19 and P("() => noteflow.links.store.size") == nA, wk)
     until("() => document.querySelector('.smartcard') && !document.querySelector('.smartcard').hidden")
     a.page.locator(".smartcard button", has_text="Link").first.click(); a.page.wait_for_timeout(400)
     C.check("…and confirming it makes a 'suggested' link, as before", P("() => noteflow.links.store.countSrc('suggested')") == 1 and P("() => noteflow.links.store.size") == nA + 1)

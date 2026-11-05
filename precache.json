@@ -10,6 +10,7 @@
 "js/editor.js",
 "js/flow.js",
 "js/keys.js",
+"js/lexicon.js",
 "js/links.js",
 "js/linkui.js",
 "js/model.js",
