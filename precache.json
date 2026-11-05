@@ -14,6 +14,7 @@
 "js/links.js",
 "js/linkui.js",
 "js/model.js",
+"js/pagemove.js",
 "js/panel.js",
 "js/paper.js",
 "js/pdfio.js",

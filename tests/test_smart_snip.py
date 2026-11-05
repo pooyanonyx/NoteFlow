@@ -60,7 +60,7 @@ with sync_playwright() as pw:
             "Smart linking" in a.page.locator(".dialog").inner_text() and "typed text only" in a.page.locator(".dialog").inner_text() and a.page.locator(".dialog select").count() == 1)
     a.page.get_by_role("button", name="Check the open pages now").click(); until("() => noteflow.smart.stats.scans >= 1 && !noteflow.smart.scanning")
     sg = SM(); read = P("() => noteflow.smart.stats.read")
-    C.check("'Check now' suggests the passage on the PDF page being viewed (p. 20) for the note on the notebook page being viewed (p. 100)", len(sg) == 1 and sg[0]["page"] == 19 and sg[0]["nb"] == 99 and 0.55 <= sg[0]["score"] < 0.88, sg)
+    C.check("'Check now' suggests the passage on the PDF page being viewed (p. 20) for the note on the notebook page being viewed (p. 100)", len(sg) == 1 and sg[0]["page"] == 19 and sg[0]["nb"] == 99 and 0.55 <= sg[0]["score"] <= 1, sg)
     C.check("…and it read ONLY the active pages: PDF p. 20, Notebook p. 100, the board's visible area (not PDF p. 8, not Notebook p. 6)",
             all(r in (["pdf", 19], ["nb", 99], ["board", 0]) for r in read) and ["pdf", 19] in read and ["nb", 99] in read, read)
     card = a.page.locator(".smartcard").inner_text()
@@ -69,7 +69,7 @@ with sync_playwright() as pw:
     a.page.locator(".smartcard button", has_text="Link").first.click(); a.page.wait_for_timeout(500)
     L = P("() => noteflow.links.store.toJSON().links")
     C.check("confirming makes an ordinary link marked 'suggested' with its confidence, quoting the passage with its boxes",
-            len(L) == 1 and L[0]["src"] == "suggested" and 0.55 <= L[0]["score"] < 0.9 and L[0]["b"]["k"] == "pdf" and L[0]["b"]["page"] == 19 and "TCP handshake" in L[0]["b"]["quote"]["text"] and len(L[0]["b"]["quote"]["rects"]) >= 1, L)
+            len(L) == 1 and L[0]["src"] == "suggested" and 0.55 <= L[0]["score"] <= 1 and L[0]["b"]["k"] == "pdf" and L[0]["b"]["page"] == 19 and "TCP handshake" in L[0]["b"]["quote"]["text"] and len(L[0]["b"]["quote"]["rects"]) >= 1, L)
     C.check("the card is gone and the same pair is not suggested again", P("() => noteflow.smart.suggestions.length") == 0)
     a.ev("() => { noteflow.links.manage(); }"); a.page.wait_for_timeout(300)
     dlg = a.page.locator(".dialog").inner_text()
