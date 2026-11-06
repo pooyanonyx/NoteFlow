@@ -22,7 +22,7 @@ export const MODES = [["off", "Off"], ["suggest", "Suggest links (I confirm)"], 
 // numbers are not comparable to the earlier, purely literal ones: .70 then selected near-copies only.)
 // On a page with fewer than RARITY_MIN_PASSAGES passages (a slide, a caption) there is nothing to tell distinctive words from ordinary ones, every score is inflated
 // (notes about another fact of the same topic reach .74 there), so automatic links need AUTO_AT_SMALL; suggestions are unaffected.
-export const SUGGEST_AT = 0.30, AUTO_AT = 0.55, AUTO_MIN_EXACT = 2, AUTO_MIN_WORDS = 3, AUTO_MARGIN = 0.10, AUTO_AT_SMALL = 0.70, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, SUGGESTION_TTL_MS = 30000, TTL_WARN_MS = 8000, CLOCK_MS = 250, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
+export const SUGGEST_AT = 0.30, AUTO_AT = 0.55, AUTO_MIN_EXACT = 2, AUTO_MIN_WORDS = 3, AUTO_MARGIN = 0.10, AUTO_AT_SMALL = 0.70, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, SUGGESTION_TTL_MS = 15000, TTL_WARN_MS = 5000, CLOCK_MS = 250, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
 /** May this match be linked without asking? A high enough score; at least AUTO_MIN_EXACT words found as written (so it is never only a lookalike of synonyms); at least
  *  AUTO_MIN_WORDS words found as written or as a word of the same meaning (so it is never two words in common); and clearly ahead of the next best, different place
  *  (a passage that fits two places about equally is left to the user); and no clash of numbers ("type 1" against "type 2"). c: { score, exact, syn, second, clash } */
@@ -234,7 +234,15 @@ export class SmartLink {
   }
   reject(sg) { if (sg.done) return; sg.done = true; this.store.reject(sg.key); this.drop(sg); this.app.scheduleAutosave(); }
   /** The time of a suggestion ran out without an answer: exactly "Not related" (remembered, not offered again), and never a link. */
-  expire(sg) { if (sg.done || sg.busy) return; this.reject(sg); }
+  expire(sg) { if (sg.done || sg.busy) return; if (sg === this.report) this.dismissReport(sg); else this.reject(sg); }
+  /** What is being counted down now: the suggestions on screen, or, when there are none, the notice (the result of "Check now": no match found, or what was linked on its own). */
+  counted() {
+    if (this.card.hidden) return [];
+    const list = this.suggestions.slice(0, SHOW_AT_ONCE).filter((x) => !x.done);
+    return list.length ? list : (this.report && !this.report.done && !this.suggestions.length ? [this.report] : []);
+  }
+  /** The notice goes away (by its time or by its close button): nothing else is touched. */
+  dismissReport(r) { if (!r || r.done || this.report !== r) return; r.done = true; this.report = null; this.draw(); }
   /** "Not now" for everything shown: they are not offered again in this session. */
   later() { for (const sg of this.suggestions) { sg.done = true; this.snoozed.add(sg.key); } this.suggestions = []; this.report = null; this.draw(); }
   async show(sg) {
@@ -255,11 +263,11 @@ export class SmartLink {
   held(sg) { const r = sg.ui && sg.ui.row; return !!r && r.isConnected && (r.matches(":hover") || r.contains(document.activeElement)); }
   tickClock() {
     const now = performance.now(), dt = Math.min(Math.max(0, now - this.lastTick), 1000); this.lastTick = now;
-    const shown = this.card.hidden ? [] : this.suggestions.slice(0, SHOW_AT_ONCE).filter((x) => !x.done);
+    const shown = this.counted();
     if (!shown.length) { this.stopClock(); return; }
     if (document.hidden) return;
     for (const sg of shown) {
-      if (sg.left == null || sg.busy) continue;
+      if (sg.left == null || sg.busy || sg.done) continue;
       const hold = this.held(sg);
       if (!hold) sg.left -= dt;
       if (sg.left <= 0) { this.expire(sg); continue; }
@@ -271,7 +279,7 @@ export class SmartLink {
     const f = Math.max(0, Math.min(1, sg.left / this.ttl)), sec = Math.ceil(sg.left / 1000);
     u.bar.style.transform = `scaleX(${f})`; u.num.textContent = sec + " s";
     u.row.classList.toggle("low", sg.left <= TTL_WARN_MS); u.row.classList.toggle("hold", hold);
-    u.num.title = hold ? "Paused while you look at it" : `Dismissed as “Not related” in ${sec} s unless you answer`;
+    u.num.title = hold ? "Paused while you look at it" : sg === this.report ? `Closes by itself in ${sec} s` : `Dismissed as “Not related” in ${sec} s unless you answer`;
   }
   /** The passage / note text for the card: whitespace tidied, cut at n characters, with the words that matched marked. */
   marked(text, toks, n) {
@@ -287,14 +295,20 @@ export class SmartLink {
     const show = this.mode !== "off" && list.length || (rep && rep.manual);
     this.card.hidden = !show; if (!show) { this.stopClock(); return; }
     for (const sg of list) if (sg.left == null) sg.left = this.ttl;           // (it is on screen now: its time starts)
-    if (list.length) this.startClock(); else this.stopClock();
+    if (list.length || (rep && !rep.done)) this.startClock(); else this.stopClock();
     const head = (t, closeFn) => el("div", { class: "schead" }, icon("chain"), el("b", {}, t), el("button", { class: "btn small", type: "button", title: "Not now", "aria-label": "Close", onclick: closeFn }, icon("close")));
     if (!list.length) {
-      this.card.replaceChildren(head("Smart linking", () => { this.report = null; this.draw(); }),
+      if (rep.left == null) rep.left = this.ttl;                                // (the notice is on screen now: its time starts, the same time and the same clock as a suggestion)
+      const bar = el("span", { class: "sugbar" }), num = el("span", { class: "sugclock", role: "timer", "aria-live": "off" });
+      const box = el("div", { class: "sug screp" },
         el("p", { class: "scmsg" }, rep.linked ? `${rep.linked} link${rep.linked === 1 ? " was" : "s were"} made automatically between the pages you are looking at. See Links to review.` : "No strong match found between the pages you are looking at."),
         el("p", { class: "scsmall" }, "Compared: " + (rep.surfaces.join("  ↔  ") || "nothing (open two panels)") + "."),
         ...rep.notes.map((n) => el("p", { class: "scsmall warn" }, n)),
-        el("p", { class: "scsmall" }, "Only typed text is compared, and only on these pages. Handwriting, images and PDF pages without selectable text cannot be analyzed."));
+        el("p", { class: "scsmall" }, "Only typed text is compared, and only on these pages. Handwriting, images and PDF pages without selectable text cannot be analyzed."),
+        el("div", { class: "sugact" }, el("span", { class: "sugpct" }, "Closes by itself"), num),
+        el("span", { class: "sugtrack", "aria-hidden": "true" }, bar));
+      this.card.replaceChildren(head("Smart linking", () => this.dismissReport(rep)), box);
+      rep.ui = { row: box, bar, num }; this.paintClock(rep);
       return;
     }
     this.card.replaceChildren(head(`Suggested links (${this.suggestions.length})`, () => this.later()),

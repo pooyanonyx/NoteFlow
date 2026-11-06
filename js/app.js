@@ -242,12 +242,18 @@ export class App {
   onPaste(e) {
     const t = e.target;
     if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;           // normal text paste
-    const p = this.active; if (!p || !p.hasPage) return;
     const items = [...(e.clipboardData?.items || [])];
     const img = items.find((i) => i.kind === "file" && i.type.startsWith("image/"));
-    if (img) { e.preventDefault(); p.insertImageBlob(img.getAsFile()); return; }
     const text = e.clipboardData?.getData("text/plain");
-    if (text && text.trim()) { e.preventDefault(); p.insertText(text); }
+    const hasText = !!(text && text.trim());
+    // A text paste that an editor already took (the rich text editor handles it and calls preventDefault, but the event still bubbles up to this document-level listener) or that is aimed
+    // at an editable element is the editor's own: handling it here as well made a second text box with the same text. A picture alone is different: the editor cannot hold one, so it is
+    // still added to the page, as before.
+    const inEditor = e.defaultPrevented || !!(t && t.isContentEditable);
+    if (inEditor && (hasText || !img)) return;
+    const p = this.active; if (!p || !p.hasPage) return;
+    if (img) { e.preventDefault(); p.insertImageBlob(img.getAsFile()); return; }
+    if (hasText) { e.preventDefault(); p.insertText(text); }
   }
   panelAt(x, y) { const e = document.elementFromPoint(x, y)?.closest?.(".panel"); return e ? this.panels[e.dataset.key] : null; }
   async onDrop(e) {

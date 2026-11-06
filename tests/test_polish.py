@@ -62,8 +62,8 @@ with sync_playwright() as pw:
     P("() => { const st = noteflow.links.store, o = st.reject.bind(st); window.__rej = 0; st.reject = (k) => { window.__rej++; return o(k); }; window.__linksBefore = st.size; }")
     until("() => noteflow.smart.suggestions.length === 0", timeout=15000)
     C.check("when the time runs out the suggestion is dismissed like 'Not related': once, remembered, and NO link is made",
-            P("() => window.__rej") == 1 and P("() => noteflow.links.store.rejects.size") == 1 and P("() => noteflow.links.store.size") == 0 and a.page.locator(".smartcard .sug").count() == 0)
-    C.check("the clock stops when nothing is left to count", P("() => noteflow.smart.clock") == 0)
+            P("() => window.__rej") == 1 and P("() => noteflow.links.store.rejects.size") == 1 and P("() => noteflow.links.store.size") == 0 and a.page.locator(".smartcard .sug:not(.screp)").count() == 0)
+    C.check("the notice of the manual check then takes the clock over, and the clock stops when it is gone too", P("() => noteflow.smart.counted().length") <= 1 and (until("() => noteflow.smart.counted().length === 0 && !noteflow.smart.clock", timeout=9000) or True) and P("() => noteflow.smart.clock") == 0)
     scan(); n0 = P("() => noteflow.smart.stats.scans"); a.page.wait_for_timeout(300)
     C.check("the same suggestion does not come back", not SG())
     P("async () => { await noteflow.panels.pdf.goto(1); await noteflow.panels.pdf.goto(0); }"); a.page.wait_for_timeout(5200)
@@ -73,8 +73,10 @@ with sync_playwright() as pw:
     notes(N1b); scan(); a.page.wait_for_timeout(1800); b0 = SG()[0]["left"]; scan(); b1 = SG()[0]["left"]
     C.check("a rescan keeps what is left of the time of a suggestion that is still the same (no new full time)", len(SG()) == 1 and b1 <= b0 + 100 and b1 < 4800, (b0, b1))
     a.page.locator(".smartcard button", has_text="Link").first.click(); a.page.wait_for_timeout(500)
-    C.check("accepting in time makes exactly one link, marked as suggested; the suggestion and the clock are gone", P("() => noteflow.links.store.size") == 1 and P("() => noteflow.links.store.all()[0].src") == "suggested" and not SG() and P("() => noteflow.smart.clock") == 0)
-    a.page.wait_for_timeout(7000)
+    C.check("accepting in time makes exactly one link, marked as suggested; the suggestion and the clock are gone", P("() => noteflow.links.store.size") == 1 and P("() => noteflow.links.store.all()[0].src") == "suggested" and not SG() and P("() => noteflow.smart.counted().every((x) => x === noteflow.smart.report)"))
+    a.page.mouse.move(300, 300); until("() => noteflow.smart.counted().length === 0 && !noteflow.smart.clock", timeout=9000); a.page.wait_for_timeout(1000)
+    C.check("…and the clock stops with the notice", P("() => noteflow.smart.clock") == 0)
+    a.page.wait_for_timeout(5000)
     C.check("…and when its time would have ended nothing happens: still one link, nothing more rejected", P("() => noteflow.links.store.size") == 1 and P("() => noteflow.links.store.rejects.size") == 1 and P("() => window.__rej") == 1)
     ws = P("""async () => { const WS = await import('./js/workspace.js'); const blob = await WS.writeWorkspace(noteflow.collect()); const ws = await WS.readWorkspace(await blob.arrayBuffer());
       await noteflow.restore(ws); return [ws.links.rejects.length, noteflow.links.store.rejects.size, noteflow.links.store.size, noteflow.smart.suggestions.length]; }""")
@@ -92,6 +94,7 @@ with sync_playwright() as pw:
     C.check("the other one then runs out by itself: both are rejected, none linked", P("() => noteflow.links.store.rejects.size") == 2 and P("() => noteflow.links.store.size") == 0, P("() => [noteflow.links.store.rejects.size, noteflow.links.store.size]"))
 
     # ===================================================== the slim manual Link bar
+    P("() => noteflow.smart.setMode('off')")                                 # (the card of the earlier part must not lie over the notebook)
     notes(N1); P("() => { const nb = noteflow.panels.nb; nb.setTool('select'); nb.selected = 0; nb.render(); noteflow.setActive(nb); }")
     a.page.locator('.topbar button[title^="Link two things"]').click(); a.page.wait_for_timeout(300)
     g = a.page.locator(".linkguide:not(.snipcard)")
