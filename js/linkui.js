@@ -31,7 +31,7 @@ export function itemKind(d) {
 export class LinkController {
   constructor(app) {
     this.app = app; this.store = new LinkStore(); this.pick = null; this.rev = 0; this.cache = new Map(); this.cacheRev = -1;
-    this.guide = el("div", { class: "linkguide", hidden: true, role: "region", "aria-label": "Making a link" });
+    this.guide = el("div", { class: "linkguide linkbar", hidden: true, role: "region", "aria-label": "Link two things" });
     app.root.append(this.guide);
     this.store.onChange(() => { this.rev++; this.renderAll(); });
   }
@@ -161,7 +161,7 @@ export class LinkController {
   }
   begin(a) {
     this.pick = { a }; this.say();
-    for (const p of Object.values(this.app.panels)) { p.root.classList.add("linkpick"); if (p.tool !== "pan") p.cancelAction?.(); }
+    for (const p of Object.values(this.app.panels)) { p.root.classList.add("linkpick"); p.releaseToolCursor(); if (p.tool !== "pan") p.cancelAction?.(); }
     if (a && a.k === "item") this.showPdfFor();
     if (this.app.active) this.app.active.render();
   }
@@ -178,24 +178,26 @@ export class LinkController {
     this.guide.hidden = !k; if (!k) return;
     const a = k.a, step = a ? 2 : 1;
     const pdfOpen = Object.values(this.app.panels).some((p) => p.kind === "pdf" && p.pdf);
-    const chip = (n, an, hint) => {
-      const done = !!an, now = step === n;
-      return el("button", { class: "lchip" + (done ? " done" : "") + (now ? " now" : ""), type: "button", disabled: !done || n !== 1, title: done && n === 1 ? "Click to choose a different first end" : "",
+    // One slim row: [chain] (1 From ...) -> (2 To ...) [Step n of 2] [Cancel]. The instruction for the next step lives in the empty chip itself (full text in its tooltip),
+    // so the bar stays a single line on a normal window and only wraps on a narrow one.
+    let hint, short;
+    if (!a) { hint = "Choose the first end. Tap a note, text box or drawing — or, in a PDF, tap a page, drag a box around a region, or drag across text."; short = "Tap a note, text box or drawing, or a PDF page / region / text"; }
+    else if (a.k === "pdf") { hint = "Now choose the other end: tap the note, text box or drawing that should be linked to this PDF place."; short = "Tap the note or drawing to link it to"; }
+    else if (!pdfOpen) { hint = "Now choose what it points to. No PDF is open yet: open one (Open PDF), then tap a page."; short = "Tap a note, or open a PDF first"; }
+    else { hint = "Now choose what it points to. In the PDF, tap a page to link the whole page, drag a box to link a region, or drag across text to link a passage."; short = "Tap a PDF page, drag a box, or drag across text"; }
+    const chip = (n, an) => {
+      const done = !!an, now = step === n, label = n === 1 ? "From" : "To";
+      return el("button", { class: "lchip" + (done ? " done" : "") + (now ? " now" : ""), type: "button", disabled: !done || n !== 1, title: done ? (n === 1 ? "Click to choose a different first end" : "") : (now ? hint : ""),
         onclick: () => { if (n === 1 && done) { this.pick.a = null; this.say(); } } },
         el("span", { class: "lnum" }, done ? "✓" : String(n)),
-        done ? el("span", { class: "ltxt" }, el("span", { class: "lkind" }, (n === 1 ? "From · " : "To · ") + this.kindOf(an)), el("span", { class: "ltitle" }, this.describe(an).title))
-          : el("span", { class: "ltxt" }, el("span", { class: "lkind" }, n === 1 ? "From" : "To"), el("span", { class: "lph" }, hint)));
+        done ? el("span", { class: "ltxt" }, el("span", { class: "lkind" }, `${label} · ${this.kindOf(an)}`), el("span", { class: "ltitle" }, this.describe(an).title))
+          : el("span", { class: "ltxt" }, el("span", { class: "lkind" }, label), el("span", { class: "lph" }, now ? short : "After the first")));
     };
-    let hint;
-    if (!a) hint = "Choose the first end. Tap a note, text box or drawing — or, in a PDF, tap a page, drag a box around a region, or drag across text.";
-    else if (a.k === "pdf") hint = "Now choose the other end: tap the note, text box or drawing that should be linked to this PDF place.";
-    else if (!pdfOpen) hint = "Now choose what it points to. No PDF is open yet: open one (Open PDF), then tap a page.";
-    else hint = "Now choose what it points to. In the PDF, tap a page to link the whole page, drag a box to link a region, or drag across text to link a passage.";
     this.guide.replaceChildren(
-      el("div", { class: "lghead" }, icon("chain"), el("b", {}, "Link two things"), el("span", { class: "lgstep" }, `Step ${step} of 2`),
-        el("button", { class: "btn small", type: "button", title: "Stop linking (Esc)", onclick: () => this.cancel() }, "Cancel")),
-      el("div", { class: "lgchips" }, chip(1, a, "Not chosen yet"), el("span", { class: "larrow" }, "→"), chip(2, null, step === 2 ? "Choose it now" : "After the first")),
-      el("div", { class: "lghint" }, hint));
+      icon("chain"),
+      el("div", { class: "lgchips" }, chip(1, a), el("span", { class: "larrow" }, "→"), chip(2, null)),
+      el("span", { class: "lgstep" }, `Step ${step} of 2`),
+      el("button", { class: "btn small", type: "button", title: "Stop linking (Esc)", onclick: () => this.cancel() }, "Cancel"));
   }
   cancel() {
     if (!this.pick) return;

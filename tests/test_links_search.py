@@ -46,7 +46,7 @@ with sync_playwright() as pw:
     pk = P("() => noteflow.links.pick")
     C.check("Link with a note selected: it is the first end at once, and a guide card shows the steps", pk and pk["a"]["k"] == "item" and pk["a"]["pv"] == "TCP notes" and P("() => !document.querySelector('.linkguide:not(.snipcard)').hidden"), pk)
     g = a.page.locator(".linkguide:not(.snipcard)").inner_text()
-    C.check("the guide says which step it is, shows the first end that was chosen, and tells what to do next", "Step 2 of 2" in g and "TCP notes" in g and "tap a page" in g, g)
+    C.check("the guide says which step it is, shows the first end that was chosen, and tells what to do next", "Step 2 of 2" in g and "TCP notes" in g and "PDF page" in g, g)
     P("async () => { await noteflow.panels.pdf.goto(19); }"); a.page.wait_for_timeout(700)
     x, y = screen("pdf", 19, 300, 500); a.page.mouse.click(x, y); a.page.wait_for_timeout(300)
     L = links()

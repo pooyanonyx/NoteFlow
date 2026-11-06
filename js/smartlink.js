@@ -9,7 +9,7 @@
 // never in several at once; the amount of text read is capped; it works in small slices; a slow scan makes the next ones wait longer.
 import * as M from "./model.js";
 import { pageTextData, rectsForRange } from "./pdftext.js";
-import { RARITY_MIN_PASSAGES, passagesOf, noteUnits, findMatches } from "./similar.js";
+import { RARITY_MIN_PASSAGES, passagesOf, noteUnits, findMatches, matchRanges } from "./similar.js";
 import { normalize } from "./textnorm.js";
 import { el, icon, toast } from "./ui.js";
 
@@ -22,7 +22,7 @@ export const MODES = [["off", "Off"], ["suggest", "Suggest links (I confirm)"], 
 // numbers are not comparable to the earlier, purely literal ones: .70 then selected near-copies only.)
 // On a page with fewer than RARITY_MIN_PASSAGES passages (a slide, a caption) there is nothing to tell distinctive words from ordinary ones, every score is inflated
 // (notes about another fact of the same topic reach .74 there), so automatic links need AUTO_AT_SMALL; suggestions are unaffected.
-export const SUGGEST_AT = 0.30, AUTO_AT = 0.55, AUTO_MIN_EXACT = 2, AUTO_MIN_WORDS = 3, AUTO_MARGIN = 0.10, AUTO_AT_SMALL = 0.70, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
+export const SUGGEST_AT = 0.30, AUTO_AT = 0.55, AUTO_MIN_EXACT = 2, AUTO_MIN_WORDS = 3, AUTO_MARGIN = 0.10, AUTO_AT_SMALL = 0.70, MAX_SUGGESTIONS = 5, SHOW_AT_ONCE = 3, SUGGESTION_TTL_MS = 30000, TTL_WARN_MS = 8000, CLOCK_MS = 250, MAX_AUTO_PER_SCAN = 10, POLL_MS = 1500;
 /** May this match be linked without asking? A high enough score; at least AUTO_MIN_EXACT words found as written (so it is never only a lookalike of synonyms); at least
  *  AUTO_MIN_WORDS words found as written or as a word of the same meaning (so it is never two words in common); and clearly ahead of the next best, different place
  *  (a passage that fits two places about equally is left to the user); and no clash of numbers ("type 1" against "type 2"). c: { score, exact, syn, second, clash } */
@@ -38,6 +38,7 @@ export class SmartLink {
   constructor(app) {
     this.app = app; this.mode = "off"; this.suggestions = []; this.snoozed = new Set(); this.report = null;
     this.scanning = false; this.seenSig = null; this.scannedSig = null; this.coolUntil = 0; this.timer = 0;
+    this.ttl = SUGGESTION_TTL_MS; this.clock = 0; this.lastTick = 0;      // how long a shown suggestion waits for an answer (ms), and the one clock that counts it down
     this.stats = { scans: 0, read: [], lastMs: 0 };                    // (what the last scan looked at: the tests check it is only the active pages)
     this.card = el("aside", { class: "smartcard", hidden: true, "aria-label": "Suggested links" });
     app.root.append(this.card);
@@ -48,7 +49,7 @@ export class SmartLink {
   setMode(mode, { silent = false } = {}) {
     if (!MODES.some(([m]) => m === mode)) mode = "off";
     this.mode = mode; clearInterval(this.timer); this.timer = 0; this.scannedSig = this.seenSig = null;          // (turning it on looks at the pages that are on screen now)
-    if (mode === "off") { this.suggestions = []; this.report = null; this.seenSig = this.scannedSig = null; this.draw(); }
+    if (mode === "off") { this.suggestions = []; this.report = null; this.stopClock(); this.seenSig = this.scannedSig = null; this.draw(); }
     else { this.timer = setInterval(() => this.poll(), POLL_MS); if (!silent) toast(mode === "auto" ? "Smart linking is on: clear matches are linked automatically, weaker ones are suggested." : "Smart linking is on: close matches are suggested, you confirm them."); }
     this.app.scheduleAutosave && this.app.scheduleAutosave();
   }
@@ -79,7 +80,7 @@ export class SmartLink {
       if ((d.t !== "text" && d.t !== "note" && d.t !== "node") || typeof d.text !== "string" || !d.text.trim()) continue;
       if (visible) { const b = panel.boundsOf(d); if (b[2] < visible[0] || b[0] > visible[2] || b[3] < visible[1] || b[1] > visible[3]) continue; }
       const text = d.text.slice(0, MAX_ITEM_TEXT);
-      for (const u of noteUnits(text)) out.push({ item: d, panel, page, text: text.slice(u.s, u.e), s: u.s, e: u.e, toks: u.toks, nums: u.nums });
+      for (const u of noteUnits(text)) out.push({ item: d, panel, page, text: text.slice(u.s, u.e), s: u.s, e: u.e, toks: u.toks, nums: u.nums, parts: u.parts });
     }
     return out;
   }
@@ -142,7 +143,9 @@ export class SmartLink {
         if (one.has(k)) found.splice(i--, 1); else one.add(k);
       }
       const made = this.mode === "auto" ? await this.autoLink(found) : { n: 0, left: found };      // third mode: confident matches are linked right here, before anything is shown
-      this.suggestions = made.left.slice(0, MAX_SUGGESTIONS);                                      // (what is left: weaker matches, to be confirmed by the user)
+      const before = new Map(this.suggestions.map((x) => [x.key, x]));
+      this.suggestions = made.left.filter((x) => !this.store.isRejected(x.key)).slice(0, MAX_SUGGESTIONS);   // (what is left: weaker matches, to be confirmed by the user; not one that expired while this scan ran)
+      for (const sg of this.suggestions) { const old = before.get(sg.key); if (old) sg.left = old.left; }     // a suggestion that is still the same keeps what is left of its time (a new scan does not give it a new one)
       this.scannedSig = sig; this.seenSig = sig;
       this.report = { manual, surfaces: sf.map((s) => s.label), notes, none: !this.suggestions.length, linked: made.n };
       this.draw();
@@ -157,7 +160,7 @@ export class SmartLink {
     const n = r.note, text = n.text, pass = r.passage;
     let target, targetKey, targetText;
     if (B.kind === "pdf") { target = { kind: "pdf", panel: B.panel, page: B.page, s: pass.s, e: pass.e }; targetKey = `pdf:${B.panel.pdf.hash.slice(0, 12)}:${B.page}:${pass.s}`; targetText = B.text.slice(pass.s, pass.e); }
-    else { target = { kind: "item", panel: B.panel, page: B.page, item: pass.item }; targetKey = `item:${hash(normalize(pass.text).slice(0, 80))}`; targetText = pass.text; }
+    else { target = { kind: "item", panel: B.panel, page: B.page, item: pass.item }; const itext = String(pass.item.text).slice(0, MAX_ITEM_TEXT).slice(pass.s, pass.e); targetKey = `item:${hash(normalize(itext).slice(0, 80))}`; targetText = itext; }          // (the narrowed range of the item, not the whole block)
     const key = `${hash(normalize(text).slice(0, 120))}|${targetKey}`;
     if (this.store.isRejected(key) || this.snoozed.has(key)) return null;
     const id = n.item.id;                                                    // already linked to that place? (the item may not have an id yet = never linked)
@@ -166,7 +169,7 @@ export class SmartLink {
       if (target.kind === "pdf" && o.k === "pdf" && o.doc === B.panel.pdf.hash && o.page === B.page) return null;
       if (target.kind === "item" && o.k === "item" && pass.item.id && o.id === pass.item.id) return null;
     }
-    return { key, score: r.score, exact: r.exact, syn: r.syn, fuzzy: r.fuzzy, clash: r.clash, pool: r.pool, second: r.second, shared: r.shared, from: { panel: A.panel, page: A.page, item: n.item, text }, to: target, toText: targetText, noteText: text, shown: false };
+    return { key, score: r.score, exact: r.exact, syn: r.syn, fuzzy: r.fuzzy, clash: r.clash, pool: r.pool, second: r.second, shared: r.shared, noteToks: n.toks, toToks: pass.toks, from: { panel: A.panel, page: A.page, item: n.item, text }, to: target, toText: targetText, noteText: text, shown: false };
   }
 
   // ------------------------------------------------------------ making links
@@ -194,6 +197,7 @@ export class SmartLink {
   }
   /** Make the link of a suggestion the user confirmed (or of any suggestion). -> true when made */
   accept(sg, { auto = false } = {}) {
+    sg.done = true;
     const r = this.link(sg, { auto });
     this.drop(sg);
     if (r === "stale") toast("That note has changed since it was suggested.");
@@ -222,10 +226,17 @@ export class SmartLink {
     return { n: made.length, left };
   }
   drop(sg) { const n = this.suggestions.length; this.suggestions = this.suggestions.filter((x) => x !== sg); if (this.suggestions.length !== n) this.draw(); }
-  async confirm(sg) { await this.attachRects(sg); if (this.accept(sg)) toast("Linked. It is marked as a suggested link."); }
-  reject(sg) { this.store.reject(sg.key); this.drop(sg); this.app.scheduleAutosave(); }
+  async confirm(sg) {
+    if (sg.done || sg.busy) return;
+    sg.busy = true;                                                          // (its time stands still while the passage's boxes are read, and a second press does nothing)
+    try { await this.attachRects(sg); if (sg.done) return; if (this.accept(sg)) toast("Linked. It is marked as a suggested link."); }
+    finally { sg.busy = false; }
+  }
+  reject(sg) { if (sg.done) return; sg.done = true; this.store.reject(sg.key); this.drop(sg); this.app.scheduleAutosave(); }
+  /** The time of a suggestion ran out without an answer: exactly "Not related" (remembered, not offered again), and never a link. */
+  expire(sg) { if (sg.done || sg.busy) return; this.reject(sg); }
   /** "Not now" for everything shown: they are not offered again in this session. */
-  later() { for (const sg of this.suggestions) this.snoozed.add(sg.key); this.suggestions = []; this.report = null; this.draw(); }
+  later() { for (const sg of this.suggestions) { sg.done = true; this.snoozed.add(sg.key); } this.suggestions = []; this.report = null; this.draw(); }
   async show(sg) {
     await this.attachRects(sg);
     const a = sg.from.panel, b = sg.to.panel;
@@ -235,11 +246,48 @@ export class SmartLink {
   }
   removeAutomatic() { const ids = this.store.all().filter((l) => l.src === "auto").map((l) => l.id); for (const id of ids) this.store.remove(id); this.app.scheduleAutosave(); return ids.length; }
 
+  // ------------------------------------------------------------ the countdown
+  // Every suggestion that is on screen has SUGGESTION_TTL_MS to be answered. ONE clock counts them all down (no timer per suggestion, so nothing can fire twice); the time
+  // of a suggestion starts when it is first shown (not when it was found) and stands still while the pointer or the keyboard focus is on it, while its link is being made,
+  // and while the tab is hidden; a long gap between two ticks (a sleeping computer) counts as at most one second. When it runs out the suggestion is rejected like "Not related".
+  startClock() { if (this.clock) return; this.lastTick = performance.now(); this.clock = setInterval(() => this.tickClock(), CLOCK_MS); }
+  stopClock() { clearInterval(this.clock); this.clock = 0; }
+  held(sg) { const r = sg.ui && sg.ui.row; return !!r && r.isConnected && (r.matches(":hover") || r.contains(document.activeElement)); }
+  tickClock() {
+    const now = performance.now(), dt = Math.min(Math.max(0, now - this.lastTick), 1000); this.lastTick = now;
+    const shown = this.card.hidden ? [] : this.suggestions.slice(0, SHOW_AT_ONCE).filter((x) => !x.done);
+    if (!shown.length) { this.stopClock(); return; }
+    if (document.hidden) return;
+    for (const sg of shown) {
+      if (sg.left == null || sg.busy) continue;
+      const hold = this.held(sg);
+      if (!hold) sg.left -= dt;
+      if (sg.left <= 0) { this.expire(sg); continue; }
+      this.paintClock(sg, hold);
+    }
+  }
+  paintClock(sg, hold = false) {
+    const u = sg.ui; if (!u || !u.bar) return;
+    const f = Math.max(0, Math.min(1, sg.left / this.ttl)), sec = Math.ceil(sg.left / 1000);
+    u.bar.style.transform = `scaleX(${f})`; u.num.textContent = sec + " s";
+    u.row.classList.toggle("low", sg.left <= TTL_WARN_MS); u.row.classList.toggle("hold", hold);
+    u.num.title = hold ? "Paused while you look at it" : `Dismissed as “Not related” in ${sec} s unless you answer`;
+  }
+  /** The passage / note text for the card: whitespace tidied, cut at n characters, with the words that matched marked. */
+  marked(text, toks, n) {
+    const t = String(text).replace(/\s+/g, " ").trim(), cut = t.length > n, shownText = cut ? t.slice(0, n - 1) : t, out = []; let at = 0;
+    for (const [a, b] of toks && toks.length ? matchRanges(toks, t) : []) { if (a >= shownText.length) break; if (a > at) out.push(shownText.slice(at, a)); out.push(el("mark", {}, shownText.slice(a, Math.min(b, shownText.length)))); at = Math.min(b, shownText.length); }
+    if (at < shownText.length) out.push(shownText.slice(at));
+    return [...out, ...(cut ? ["…"] : [])];
+  }
+
   // ------------------------------------------------------------ the card
   draw() {
     const list = this.suggestions.slice(0, SHOW_AT_ONCE), rep = this.report;
     const show = this.mode !== "off" && list.length || (rep && rep.manual);
-    this.card.hidden = !show; if (!show) return;
+    this.card.hidden = !show; if (!show) { this.stopClock(); return; }
+    for (const sg of list) if (sg.left == null) sg.left = this.ttl;           // (it is on screen now: its time starts)
+    if (list.length) this.startClock(); else this.stopClock();
     const head = (t, closeFn) => el("div", { class: "schead" }, icon("chain"), el("b", {}, t), el("button", { class: "btn small", type: "button", title: "Not now", "aria-label": "Close", onclick: closeFn }, icon("close")));
     if (!list.length) {
       this.card.replaceChildren(head("Smart linking", () => { this.report = null; this.draw(); }),
@@ -250,13 +298,19 @@ export class SmartLink {
       return;
     }
     this.card.replaceChildren(head(`Suggested links (${this.suggestions.length})`, () => this.later()),
-      ...list.map((sg) => el("div", { class: "sug" },
-        el("div", { class: "sugtxt" }, el("div", { class: "sugrow" }, el("span", { class: "sugk" }, "Note"), el("span", { class: "sugv", dir: "auto" }, `“${clip(sg.noteText, 80)}”`)),
-          el("div", { class: "sugrow" }, el("span", { class: "sugk" }, sg.to.kind === "pdf" ? `PDF p. ${sg.to.page + 1}` : "Note"), el("span", { class: "sugv", dir: "auto" }, `“${clip(sg.toText, 110)}”`))),
-        el("div", { class: "sugact" }, el("span", { class: "sugpct", title: "How closely the wording matches: " + sg.shared.join(", ") }, Math.round(sg.score * 100) + "% match"),
-          el("button", { class: "btn small primary", type: "button", onclick: () => this.confirm(sg) }, "Link"),
-          el("button", { class: "btn small", type: "button", onclick: () => this.show(sg) }, "Show"),
-          el("button", { class: "btn small", type: "button", title: "Do not suggest this again", onclick: () => this.reject(sg) }, "Not related")))),
-      this.suggestions.length > list.length ? el("div", { class: "scsmall" }, `${this.suggestions.length - list.length} more after these.`) : null);
+      ...list.map((sg) => {
+        const bar = el("span", { class: "sugbar" }), num = el("span", { class: "sugclock", role: "timer", "aria-live": "off" });
+        const row = el("div", { class: "sug" },
+          el("div", { class: "sugtxt" }, el("div", { class: "sugrow" }, el("span", { class: "sugk" }, "Note"), el("span", { class: "sugv", dir: "auto" }, "“", ...this.marked(sg.noteText, sg.toToks, 80), "”")),
+            el("div", { class: "sugrow" }, el("span", { class: "sugk" }, sg.to.kind === "pdf" ? `PDF p. ${sg.to.page + 1}` : "Note"), el("span", { class: "sugv", dir: "auto" }, "“", ...this.marked(sg.toText, sg.noteToks, 160), "”"))),
+          el("div", { class: "sugact" }, el("span", { class: "sugpct", title: "How closely the wording matches (the highlighted words matched): " + sg.shared.join(", ") }, Math.round(sg.score * 100) + "% match"),
+            el("button", { class: "btn small primary", type: "button", onclick: () => this.confirm(sg) }, "Link"),
+            el("button", { class: "btn small", type: "button", onclick: () => this.show(sg) }, "Show"),
+            el("button", { class: "btn small", type: "button", title: "Do not suggest this again", onclick: () => this.reject(sg) }, "Not related"), num),
+          el("span", { class: "sugtrack", "aria-hidden": "true" }, bar));
+        sg.ui = { row, bar, num }; this.paintClock(sg);
+        return row;
+      }),
+      ...(this.suggestions.length > list.length ? [el("div", { class: "scsmall" }, `${this.suggestions.length - list.length} more after these.`)] : []));      // (never a null child: replaceChildren would print it as the text "null")
   }
 }

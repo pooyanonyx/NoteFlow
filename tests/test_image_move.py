@@ -24,8 +24,10 @@ with sync_playwright() as pw:
         a.page.wait_for_timeout(250)
 
     def show(i):
-        """Scroll so that page i is at the top of the view (the next page is visible below it) and the Select tool is on."""
-        P("(i) => { const p = noteflow.panels.nb; p.setTool('select'); p.scrollToPage(i); p.render(); }", i); a.page.wait_for_timeout(250)
+        """Scroll so that page i is at the top of the view, just BELOW the floating toolbars (they cover the top of the stage, and an image under them cannot be grabbed; how
+        tall they are depends on the window width), the next page is visible below it, and the Select tool is on."""
+        P("""(i) => { const p = noteflow.panels.nb; p.setTool('select'); p.scrollToPage(i);
+          const bars = p.root.querySelector('.bars'); p.view.ty += bars ? bars.offsetHeight : 0; p.clampView(); p.positionEditor(); p.render(); }""", i); a.page.wait_for_timeout(250)
 
     def images():
         """Every image of the notebook: [page, x1, y1, x2, y2, data length, selected]."""

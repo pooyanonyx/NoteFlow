@@ -19,8 +19,8 @@ async function run(set) {
 }
 const of = (rows, l) => rows.filter((x) => x.label === l), n = (a, f) => a.filter(f).length;
 
-// (minAuto / minHeavy / maxJunk are the measured levels with a little room: ~97% / 60% / 1 on the calibration notes, ~71% / 38% / 3 on the held-out notes the scorer was never tuned on)
-for (const [name, set, minAuto, minHeavy, maxJunk] of [["calibration notes", CAL, 0.9, 0.5, 2], ["held-out notes", HOLD, 0.65, 0.3, 3]]) {
+// (minAuto / minHeavy / maxJunk are the measured levels with a little room: ~88% / 60% / 1 on the calibration notes (the score now describes the narrowed range that is shown, not the larger window it was found in: a little more conservative, never glued to a neighbouring sentence), ~71% / 38% / 3 on the held-out notes the scorer was never tuned on)
+for (const [name, set, minAuto, minHeavy, maxJunk] of [["calibration notes", CAL, 0.85, 0.5, 2], ["held-out notes", HOLD, 0.65, 0.3, 3]]) {
   test(`${name}: rewordings of the same statement are linked, and every one is at least suggested at the right place`, async () => {
     const rows = await run(set), a = of(rows, "auto");
     assert.ok(n(a, (x) => x.auto) / a.length >= minAuto, `auto rate ${n(a, (x) => x.auto)}/${a.length}`);

@@ -179,6 +179,14 @@ select.paper { max-width:150px; }
 .linkguide { position:fixed; z-index:60; left:50%; bottom:max(64px, calc(env(safe-area-inset-bottom) + 56px)); transform:translateX(-50%); box-sizing:border-box; width:min(620px, calc(100vw - 20px));
   background:#fff; color:#1f2937; border:2px solid #00897b; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35); padding:10px 12px 12px; display:flex; flex-direction:column; gap:8px; }
 .linkguide[hidden] { display:none; }
+/* the manual Link bar: one slim row at the very bottom (the snipping card keeps the roomy .linkguide look) */
+.linkbar { bottom:max(10px, calc(env(safe-area-inset-bottom) + 6px)); width:min(740px, calc(100vw - 16px)); border-width:1.5px; border-radius:12px; padding:5px 8px; flex-direction:row; align-items:center; flex-wrap:wrap; gap:6px 8px; box-shadow:0 4px 16px rgba(0,0,0,.28); color:#00695c; }
+.linkbar .lgchips { flex:1 1 280px; min-width:0; gap:6px; } .linkbar .larrow { font-size:14px; color:#64748b; }
+.linkbar .lchip { padding:3px 8px; gap:6px; border-radius:8px; border-width:1px; }
+.linkbar .lnum { width:18px; height:18px; font-size:11px; }
+.linkbar .lchip .ltxt { flex-direction:row; align-items:baseline; gap:5px; overflow:hidden; } .linkbar .lkind { flex:none; font-size:11px; }
+.linkbar .lchip .lph, .linkbar .lchip .ltitle { font-size:12px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.linkbar .lgstep { font-size:11px; white-space:nowrap; }
 .lghead { display:flex; align-items:center; gap:8px; color:#00695c; }
 .lghead b { font-size:14px; } .lgstep { color:var(--muted); font-size:12px; margin-inline-end:auto; }
 .lgchips { display:flex; align-items:stretch; gap:8px; }
@@ -247,6 +255,14 @@ select.paper { max-width:150px; }
 .smartcard[hidden] { display:none; }
 .schead { display:flex; align-items:center; gap:8px; color:#5e35b1; } .schead b { flex:1; font-size:13px; }
 .sug { border:1px solid #e3dcf3; border-radius:10px; padding:6px 8px; background:#faf8fe; display:flex; flex-direction:column; gap:6px; }
+.sug { position:relative; overflow:hidden; padding-bottom:9px; }
+.sug mark { background:#fff1b8; color:inherit; border-radius:3px; padding:0 1px; }
+.sugclock { font-size:11px; font-variant-numeric:tabular-nums; color:#7a6a9a; min-width:26px; text-align:end; }     /* the countdown: small and quiet ... */
+.sugtrack { position:absolute; left:0; right:0; bottom:0; height:3px; background:#ece6f7; }
+.sugbar { display:block; height:100%; width:100%; background:#9575cd; transform-origin:left center; transition:transform .25s linear; }
+.sug.low .sugbar { background:#f59e0b; } .sug.low .sugclock { color:#b45309; font-weight:700; }                  /* ... and warmer for the last seconds */
+.sug.hold .sugbar { opacity:.45; transition:none; }
+@media (prefers-reduced-motion: reduce) { .sugbar { transition:none; } }
 .sugrow { display:flex; gap:6px; font-size:12px; line-height:1.35; } .sugk { flex:none; width:54px; font-weight:700; color:#5e35b1; } .sugv { min-width:0; overflow-wrap:anywhere; }
 .sugact { display:flex; align-items:center; gap:6px; flex-wrap:wrap; } .sugpct { margin-inline-end:auto; font-size:11px; font-weight:700; color:#5e35b1; }
 .scmsg { margin:0; font-size:13px; } .scsmall { margin:0; font-size:11px; color:#64748b; line-height:1.4; } .scsmall.warn { color:#b34700; }

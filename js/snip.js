@@ -25,7 +25,7 @@ export class SnipTool {
     this.app.links.cancel(); this.app.smart.card.hidden = true;
     for (const p of Object.values(this.app.panels)) p.finishEdit();
     this.active = true; this.clearCap();
-    for (const p of Object.values(this.app.panels)) p.root.classList.add("snipping");
+    for (const p of Object.values(this.app.panels)) { p.root.classList.add("snipping"); p.releaseToolCursor(); }     // (the capture owns the pointer: the selected tool's cursor, e.g. the eraser's outline, is dropped)
     this.say();
   }
   cancel() {

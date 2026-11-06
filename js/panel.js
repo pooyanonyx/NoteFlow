@@ -1389,12 +1389,18 @@ export class Panel {
     this.render();
   }
   /** The eraser's outline follows the pointer (mouse / pen hover, or the finger while erasing). */
+  /** Who owns the pointer right now: "snip" (the Snipping Tool is choosing an area) or "link" (a link end is being picked) take the cursor over from the selected tool, whatever it is:
+   *  the tool's own cursor overlay (the eraser's outline) is neither drawn nor tracked, and comes back by itself when the mode ends. null: the selected tool has it. */
+  get cursorOwner() { const a = this.app; return a && a.snip && a.snip.active ? "snip" : a && a.links && a.links.picking ? "link" : null; }
+  /** A mode took the pointer over (or gave it back): forget the tool's cursor overlay so nothing stale is drawn. */
+  releaseToolCursor() { if (this.eraserPos) { this.eraserPos = null; this.render(); } }
   onHover(e) {
+    if (this.cursorOwner) { this.releaseToolCursor(); return; }
     if (this.tool !== "eraser" || e.pointerType === "touch") return;
     const l = this.local(e); this.eraserPos = { x: l.x, y: l.y }; this.render();
   }
   drawEraserCursor(ctx) {
-    if (this.tool !== "eraser" || !this.eraserPos || this.root.hidden) return;
+    if (this.tool !== "eraser" || !this.eraserPos || this.root.hidden || this.cursorOwner) return;
     const r = Math.max(2, this.eraserRadius() * this.view.scale), { x, y } = this.eraserPos;
     ctx.save();
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = "rgba(120,120,120,.12)"; ctx.fill();
@@ -1951,6 +1957,7 @@ export class Panel {
     }
     this.ta.value = (d.t === "conn" ? d.label : d.text) || "";
     if (proto && proto.t === "node") this.preview = [proto, ...(extra || [])];       // the new node (and its link) is visible while its text is typed
+    else if (proto && proto.t === "note") this.preview = proto;                       // the new sticky note is a real, visible note (its paper) from the first moment, before any letter is typed
     this.ta.hidden = false;
     this.positionEditor();
     this.render();

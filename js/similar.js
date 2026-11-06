@@ -111,16 +111,35 @@ export function sentenceSpans(text) {
   push(start, text.length);
   return out;
 }
-/** Passages of a text: every run of 1-3 consecutive sentences up to maxWords words. [{ s, e, toks }] (s, e = offsets in the text). */
+const CLAUSE_MIN_WORDS = 30, CLAUSE_PIECE = 8;
+const wordCount = (t) => t.split(/\s+/).filter(Boolean).length;
+/** A long sentence cut at its clause breaks (; : , and dashes) into pieces of at least CLAUSE_PIECE words, so a passage can be narrowed below a whole sentence. null when it is short. */
+function clausesOf(text, s, e) {
+  const src = text.slice(s, e);
+  if (wordCount(src) < CLAUSE_MIN_WORDS) return null;
+  const cuts = [], re = /[;:,،؛]\s+|\s[—–-]{1,2}\s/g;
+  for (let m; (m = re.exec(src)); ) cuts.push(m.index + m[0].length);
+  const pieces = []; let a = 0;
+  for (const c of cuts) if (wordCount(src.slice(a, c)) >= CLAUSE_PIECE) { pieces.push([a, c]); a = c; }
+  if (a < src.length) { if (pieces.length && wordCount(src.slice(a)) < CLAUSE_PIECE) pieces[pieces.length - 1][1] = src.length; else pieces.push([a, src.length]); }
+  if (pieces.length < 2) return null;
+  return pieces.map(([x, y]) => mkPart(text, s + x, s + y));
+}
+const mkPart = (text, s, e) => { while (s < e && /\s/.test(text[s])) s++; while (e > s && /\s/.test(text[e - 1])) e--; const src = text.slice(s, e); return { s, e, toks: contentTokens(src), nums: numbersOf(src), words: wordCount(src) }; };
+/** The sentences of text[s, e) as parts { s, e, toks, nums, words, cl } (cl = the clauses of a long sentence, else null). */
+function partsOfRange(text, s = 0, e = text.length) {
+  return sentenceSpans(text.slice(s, e)).map(([a, b]) => { const p = mkPart(text, s + a, s + b); p.cl = clausesOf(text, p.s, p.e); return p; });
+}
+/** Passages of a text: every run of 1-3 consecutive sentences up to maxWords words. [{ s, e, toks, nums, parts }] (s, e = offsets in the text; parts = its sentences, which findMatches can narrow the passage to). */
 export function passagesOf(text, { maxWords = 80, maxPassages = 360 } = {}) {
-  const sent = sentenceSpans(text).map(([s, e]) => ({ s, e, toks: contentTokens(text.slice(s, e)), nums: numbersOf(text.slice(s, e)), words: text.slice(s, e).split(/\s+/).length }));
+  const sent = partsOfRange(text);
   const out = [];
   for (let i = 0; i < sent.length && out.length < maxPassages; i++) {
     let toks = [], words = 0; const nums = new Set();
     for (let k = i; k < Math.min(sent.length, i + 3); k++) {
       words += sent[k].words; if (words > maxWords && k > i) break;
       toks = toks.concat(sent[k].toks); for (const n of sent[k].nums) nums.add(n);
-      if (toks.length >= 3) out.push({ s: sent[i].s, e: sent[k].e, toks, nums: new Set(nums) });
+      if (toks.length >= 3) out.push({ s: sent[i].s, e: sent[k].e, toks, nums: new Set(nums), parts: sent.slice(i, k + 1) });
       if (out.length >= maxPassages) break;
     }
   }
@@ -130,14 +149,15 @@ export function passagesOf(text, { maxWords = 80, maxPassages = 360 } = {}) {
  *  so a note that mixes topics does not dilute the part that matches. [{ s, e, toks }] with at least 4 content words each. */
 export function noteUnits(text, { maxUnits = 8 } = {}) {
   const whole = contentTokens(text), multi = /\n\s*\S/.test(text.trim());
-  if (!(multi && whole.length > 20) && whole.length <= 90) return whole.length >= 4 ? [{ s: 0, e: text.length, toks: whole, nums: numbersOf(text) }] : [];
+  const withParts = (u) => { const parts = partsOfRange(text, u.s, u.e); if (parts.length > 1 || (parts[0] && parts[0].cl)) u.parts = parts; return u; };      // (so a long block can be narrowed to the sentence that matches)
+  if (!(multi && whole.length > 20) && whole.length <= 90) return whole.length >= 4 ? [withParts({ s: 0, e: text.length, toks: whole, nums: numbersOf(text) })] : [];
   const out = [];
   if (multi) {
     let pos = 0;
     for (const line of text.split(/\n+/)) {
       const s = text.indexOf(line, pos); pos = s + line.length;
       const toks = contentTokens(line);
-      if (toks.length >= 4) out.push({ s, e: s + line.length, toks, nums: numbersOf(line) });
+      if (toks.length >= 4) out.push(withParts({ s, e: s + line.length, toks, nums: numbersOf(line) }));
       if (out.length >= maxUnits) break;
     }
   } else for (const p of passagesOf(text, { maxWords: 60, maxPassages: maxUnits * 3 })) { if (p.toks.length >= 4) out.push(p); if (out.length >= maxUnits) break; }
@@ -153,7 +173,21 @@ const negated = (t, u) => { if (t.length > u.length) [t, u] = [u, t]; return u =
 /** Do two stems share a long enough beginning to be forms of one word (encrypt / encryption, synapse / synaptic)? Not when they are opposites (state / stateless). */
 const sameRoot = (t, u) => { const m = Math.min(t.length, u.length); return m >= 4 && commonPrefix(t, u) >= Math.max(4, Math.ceil(0.66 * m)) && !negated(t, u); };
 // how much a kind of match is worth, as a share of an exact match
+// narrowing a passage: keep the smallest run of sentences with at least TRIM_KEEP of the best run's matched weight; a passage longer than 4 x the note's content words (at least TRIM_CAP_MIN words) is cut at clauses
+const TRIM_KEEP = 0.85, TRIM_CAP_MIN = 24;
 export const CREDIT = { exact: 1, concept: 0.8, root: 0.6 }, GENERIC_WEIGHT = 0.45, RARITY_MIN_PASSAGES = 8;
+
+/** The words of `text` that the note's words found there (same stem, same meaning, or another form of the same root): [[start, end), ...] in `text`, for showing WHY a passage was suggested. */
+export function matchRanges(noteToks, text) {
+  const stems = new Set(), cs = new Set();
+  for (const x of noteToks) { stems.add(x.t); const c = conceptsOf(x.t); if (c) for (const id of c) cs.add(id); }
+  const out = [], re = /[^\s]+/gu;
+  for (let m; (m = re.exec(text)); ) {
+    const hit = contentTokens(m[0]).some((x) => stems.has(x.t) || (conceptsOf(x.t) || []).some((id) => cs.has(id)) || [...stems].some((t) => sameRoot(t, x.t)));
+    if (hit) out.push([m.index, m.index + m[0].length]);
+  }
+  return out;
+}
 
 /**
  * Best passage for every note. notes: [{ toks }], passages: [{ s, e, toks }] -> [{ note, passage, score, exact, syn, fuzzy, clash, pool (how many passages it was compared with), shared: [raw words], second }]
@@ -181,6 +215,61 @@ export async function findMatches(notes, passages, { floor = 0.3, yieldMs = 8 } 
     return { m, tot };
   };
   const P = passages.map((p) => ({ p, ...vec(p.toks) }));
+  /** What the note's words find in one passage q (a vec with its concept set and prefix index): the credit and how each word was found. */
+  const credit = (A, q) => {
+    let sw = 0, exact = 0, syn = 0, fuzzy = 0; const shared = [];
+    for (const [t, a] of A.m) {
+      if (q.m.has(t)) { sw += a.w; exact++; shared.push(a.raw); continue; }
+      if (a.c && a.c.some((id) => q.cs.has(id))) { sw += CREDIT.concept * a.w; syn++; shared.push(a.raw); continue; }
+      const bucket = q.pre.get(t.slice(0, 4));
+      if (bucket && bucket.some((u) => sameRoot(t, u))) { sw += CREDIT.root * a.w; fuzzy++; shared.push(a.raw); }
+    }
+    return { sw, exact, syn, fuzzy, shared };
+  };
+  const indexed = (q) => { q.pre = new Map(); q.cs = new Set(); for (const [t, v] of q.m) { const k = t.slice(0, 4); (q.pre.get(k) || q.pre.set(k, []).get(k)).push(t); if (v.c) for (const id of v.c) q.cs.add(id); } return q; };
+  /** A span of consecutive parts as a passage-like object, with its own credit for the note. */
+  const span = (A, parts, a, b) => {
+    const toks = [], nums = new Set(); let words = 0;
+    for (let k = a; k <= b; k++) { toks.push(...parts[k].toks); for (const n of parts[k].nums) nums.add(n); words += parts[k].words; }
+    const q = indexed(vec(toks));
+    return { a, b, s: parts[a].s, e: parts[b].e, toks, nums, words, q, ...credit(A, q) };
+  };
+  /** The smallest run of consecutive parts that still carries (nearly) all that the note finds in the best run: dropping a sentence only when what it adds is marginal.
+   *  strict (sentence level): a run never contains a part that matches nothing, so two separate relevant sentences are not glued together across unrelated ones. */
+  const narrow = (A, parts, strict) => {
+    const own = parts.map((_, k) => credit(A, indexed(vec(parts[k].toks))).sw);
+    const runs = [];
+    for (let a = 0; a < parts.length; a++) for (let b = a; b < parts.length; b++) {
+      if (strict && own.slice(a, b + 1).some((x) => x <= 0)) break;
+      runs.push(span(A, parts, a, b));
+    }
+    if (!runs.length) return null;
+    const top = Math.max(...runs.map((r) => r.sw));
+    return runs.filter((r) => r.sw >= TRIM_KEEP * top).sort((x, y) => x.words - y.words || y.sw - x.sw || x.a - y.a)[0];
+  };
+  /** The part of the winner that is the answer: sentences first, then (when that is still long for a short note) the clauses of a long sentence, with a little context kept. */
+  const refine = (A, note, bp, floorScore) => {
+    if (!bp.parts || !bp.parts.length) return null;
+    const noteLen = note.toks.length, cap = Math.max(TRIM_CAP_MIN, noteLen * 4), ctx = Math.max(8, Math.ceil(noteLen * 1.2));
+    let parts = bp.parts, r = narrow(A, parts, true);
+    if (!r) return null;
+    if (r.words > cap && parts.slice(r.a, r.b + 1).some((x) => x.cl)) {
+      const flat = parts.slice(r.a, r.b + 1).flatMap((x) => x.cl || [x]), r2 = narrow(A, flat, false);
+      if (r2) {
+        let { a, b } = r2, words = r2.words;
+        while (words < ctx && (a > 0 || b < flat.length - 1)) {                                // keep enough around it to read as a statement: grow towards the side that matches more
+          const l = a > 0 ? credit(A, indexed(vec(flat[a - 1].toks))).sw : -1, rr = b < flat.length - 1 ? credit(A, indexed(vec(flat[b + 1].toks))).sw : -1;
+          if (rr >= l) { b++; words += flat[b].words; } else { a--; words += flat[a].words; }
+        }
+        r = span(A, flat, a, b);
+      }
+    }
+    if (r.exact < 1 || r.exact + r.syn + r.fuzzy < 3) return null;
+    // the score describes exactly what is shown: how much of the note the narrowed range finds, and how focused it is
+    const c = r.sw / A.tot, f = Math.min(1, r.sw / (0.3 * r.q.tot)), score = c * (0.7 + 0.3 * f);
+    if (score < floorScore) return null;
+    return { s: r.s, e: r.e, toks: r.toks, nums: r.nums, score, exact: r.exact, syn: r.syn, fuzzy: r.fuzzy, shared: r.shared };
+  };
   // inverted indexes: stem -> passages, concept -> passages, 4-letter prefix -> stems (for words of one root)
   const inv = new Map(), byPre = new Map();
   const add = (k, i) => { let a = inv.get(k); if (!a) inv.set(k, (a = [])); if (a[a.length - 1] !== i) a.push(i); };
@@ -207,13 +296,7 @@ export async function findMatches(notes, passages, { floor = 0.3, yieldMs = 8 } 
     const scored = [];
     for (const [i, hits] of cand) {
       if (hits < 3) continue;
-      const q = P[i]; let sw = 0, exact = 0, syn = 0, fuzzy = 0; const shared = [];
-      for (const [t, a] of A.m) {
-        if (q.m.has(t)) { sw += a.w; exact++; shared.push(a.raw); continue; }
-        if (a.c && a.c.some((id) => q.cs.has(id))) { sw += CREDIT.concept * a.w; syn++; shared.push(a.raw); continue; }
-        const bucket = q.pre.get(t.slice(0, 4));
-        if (bucket && bucket.some((u) => sameRoot(t, u))) { sw += CREDIT.root * a.w; fuzzy++; shared.push(a.raw); }
-      }
+      const q = P[i], { sw, exact, syn, fuzzy, shared } = credit(A, q);
       if (exact < 1 || exact + syn + fuzzy < 3) continue;
       const c = sw / A.tot, f = Math.min(1, sw / (0.3 * q.tot));
       scored.push({ i, score: c * (0.7 + 0.3 * f), exact, syn, fuzzy, shared });
@@ -225,7 +308,10 @@ export async function findMatches(notes, passages, { floor = 0.3, yieldMs = 8 } 
     const other = scored.find((x) => passages[x.i].e <= bp.s || passages[x.i].s >= bp.e);      // the best passage that does not overlap the winner
     const second = other ? other.score : 0;
     if (best.score - second < 0.06) continue;                                   // ambiguous: it fits several places about equally (even a perfect score), so none of them is "the" place
-    out.push({ note, passage: bp, score: Math.round(best.score * 1000) / 1000, exact: best.exact, syn: best.syn, fuzzy: best.fuzzy, clash: numbersClash(note.nums, bp.nums), pool: N, shared: best.shared.slice(0, 8), second: Math.round(second * 1000) / 1000 });
+    // the winner is a window of up to 3 sentences: narrow it to the part that is actually about the note (the score and the evidence then describe what is shown)
+    const nar = refine(A, note, bp, floor), shown = nar ? { ...bp, s: nar.s, e: nar.e, toks: nar.toks, nums: nar.nums, narrowed: nar.s !== bp.s || nar.e !== bp.e } : { ...bp, narrowed: false }, fin = nar || best;
+    delete shown.parts;
+    out.push({ note, passage: shown, score: Math.round(fin.score * 1000) / 1000, exact: fin.exact, syn: fin.syn, fuzzy: fin.fuzzy, clash: numbersClash(note.nums, shown.nums), pool: N, shared: fin.shared.slice(0, 8), second: Math.round(second * 1000) / 1000 });
   }
   return out;
 }
