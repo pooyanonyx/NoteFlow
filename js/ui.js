@@ -20,6 +20,10 @@ export function el(tag, props = {}, ...kids) {
 
 const P = (d) => `<path d="${d}"/>`;
 const ICONS = {
+  gear: P("M4 7h9") + P("M17 7h3") + P("M15 5a2 2 0 100 4 2 2 0 000-4z") + P("M4 17h3") + P("M11 17h9") + P("M9 15a2 2 0 100 4 2 2 0 000-4z"),
+  thumbs: P("M4 4h7v7H4z") + P("M13 4h7v7h-7z") + P("M4 13h7v7H4z") + P("M13 13h7v7h-7z"),
+  bookmark: P("M7 4h10v16l-5-4-5 4z"),
+  toc: P("M9 6h11") + P("M9 12h11") + P("M9 18h11") + P("M4 6h.01") + P("M4 12h.01") + P("M4 18h.01"),
   select: P("M6 3l0 15 4-4 3 6 2.4-1.1-3-6 5.6-.4z"),
   pen: P("M4 20l1-4L16 5l3 3L8 19z") + P("M14 7l3 3"),
   mark: P("M4 21h9") + P("M8 17l8-8 3 3-8 8H8z") + P("M14 11l3 3"),
@@ -110,12 +114,23 @@ export function dialog({ title, content, buttons = [{ label: "OK", value: true, 
   return new Promise((resolve) => {
     const prevFocus = document.activeElement;
     const done = (v) => { back.remove(); document.removeEventListener("keydown", onKey, true); prevFocus?.focus?.(); resolve(v); };
-    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); done(null); } };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(null); return; }
+      if (e.key === "Tab") {                                                       // the keyboard stays inside the dialog while it is open
+        const f = [...box.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')].filter((x) => x.offsetParent !== null);
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+        else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
     const body = typeof content === "string" ? el("p", {}, content) : content;
     const btns = buttons.map((b) => el("button", { class: "btn " + (b.primary ? "primary " : "") + (b.danger ? "danger" : ""), type: "button",
       onclick: () => done(b.value) }, b.label));
-    const box = el("div", { class: "dialog", role: "dialog", "aria-modal": "true" },
-      title ? el("h2", {}, title) : null, el("div", { class: "dbody" }, body), el("div", { class: "dbtns" }, btns));
+    const hid = "dlg-title-" + Math.random().toString(36).slice(2, 8);
+    const box = el("div", { class: "dialog", role: "dialog", "aria-modal": "true", ...(title ? { "aria-labelledby": hid } : {}) },
+      title ? el("h2", { id: hid }, title) : null, el("div", { class: "dbody" }, body), el("div", { class: "dbtns" }, btns));
     const back = el("div", { class: "backdrop", onpointerdown: (e) => { if (e.target === back) done(null); } }, box);
     if (ref) ref.close = (v = null) => done(v);                  // (lets the caller close the dialog itself, e.g. after "go there")
     if (keepEdit) back.dataset.keepEdit = "1";                 // opened from a text box being typed: that text keeps its caret and selection (panel.js onRichBlur)

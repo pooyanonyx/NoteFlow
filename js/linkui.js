@@ -176,6 +176,7 @@ export class LinkController {
   say() {
     const k = this.pick;
     this.guide.hidden = !k; if (!k) return;
+    if (k.quote) { this.guide.replaceChildren(icon("chain"), el("div", { class: "lgchips" }, el("span", { class: "lgstep" }, "Quote: drag across text in the PDF. The passage goes into your notes, linked to its page.")), el("button", { class: "btn small", type: "button", onclick: () => this.cancel() }, "Cancel")); return; }
     const a = k.a, step = a ? 2 : 1;
     const pdfOpen = Object.values(this.app.panels).some((p) => p.kind === "pdf" && p.pdf);
     // One slim row: [chain] (1 From ...) -> (2 To ...) [Step n of 2] [Cancel]. The instruction for the next step lives in the empty chip itself (full text in its tooltip),
@@ -204,9 +205,36 @@ export class LinkController {
     this.pick = null; this.guide.hidden = true;
     for (const p of Object.values(this.app.panels)) { p.root.classList.remove("linkpick"); p.pickPrev = null; if (p.action && p.action.type === "pick") p.action = null; p.render(); }
   }
+  /** "Quote a passage": drag across text in a PDF; the passage becomes a quote in a notebook / board, linked to where it came from (one gesture instead of write, select, link). */
+  quote() {
+    if (this.pick) { this.cancel(); return; }
+    const target = this.quoteTarget(); if (!target) { toast("Open a Notebook or a Board panel first: the quote goes there.", 3800); return; }
+    const pdf = Object.values(this.app.panels).find((q) => q.kind === "pdf" && q.pdf && q.root && !q.root.hidden && q.pdf.hash);
+    if (!pdf) { toast("Open a PDF first, then drag across the text to quote.", 3500); return; }
+    this.pick = { a: null, quote: true }; this.say();
+    for (const q of Object.values(this.app.panels)) { q.root.classList.add("linkpick"); q.releaseToolCursor(); if (q.tool !== "pan") q.cancelAction?.(); }
+    this.app.setActive(pdf); pdf.render();
+  }
+  quoteTarget() {
+    const ok = (q) => q && (q.kind === "nb" || q.kind === "board") && q.hasPage && q.root && !q.root.hidden;
+    const a = this.app.active; if (ok(a)) return a;
+    return this.app.order.map((k) => this.app.panels[k]).find(ok) || null;
+  }
+  makeQuote(anchor) {
+    const q = this.quoteTarget(); this.cancel(); if (!q) return;
+    const text = String(anchor.quote.text).replace(/\s+/g, " ").trim(), rtl = /[\u0590-\u08FF]/.test(text), tail = `— ${anchor.name || "PDF"}, p. ${anchor.page + 1}`;
+    const [pw] = q.pageDims(), w = Math.min(Math.max(120, pw - 100), 420), page = q.kind === "board" ? 0 : q.cur, st = q.groups.text || q.curStyle;
+    let d = { t: "text", x: rtl ? Math.max(20, pw - 50 - w) : 50, y: Math.max(20, q.belowBars(page) + 10), w, dir: rtl ? "rtl" : "ltr", align: rtl ? "right" : "left", text: `“${text}”\n${tail}`, color: st.color, size: Math.min(st.size || 18, 18), alpha: 255, bright: 0,
+      runs: [{ s: `“${text}”\n`, i: 1 }, { s: tail }] };
+    M.ensureId(d);
+    const idx = q.items.length; q.commit([...q.items, q.settle(d)], { select: idx });
+    const a = this.itemAnchor(q, idx, page); if (a) this.store.add(a, anchor);
+    this.app.scheduleAutosave(); toast(`Quoted into ${q.label}, linked to ${anchor.name || "the PDF"} p. ${anchor.page + 1}.`, 3600);
+  }
   /** One end was chosen. */
   choose(anchor, panel) {
     if (!this.pick || !anchor) return;
+    if (this.pick.quote) { if (anchor.k === "pdf" && anchor.quote) this.makeQuote(anchor); else toast("Drag across text in the PDF to quote it.", 2600); return; }
     if (!this.pick.a) { this.pick.a = anchor; this.say(); if (anchor.k === "item") this.showPdfFor(); return; }
     const first = this.pick.a, res = this.store.add(first, anchor);
     if (!res) { toast("Choose a different place for the other end."); return; }
@@ -375,6 +403,7 @@ export class LinkController {
         el("p", { class: "smnote" }, "Compares only the pages you are looking at (for example PDF page 20 and Notebook page 100) and offers a link when a note closely matches a passage, even if worded differently. It runs on this device and sends nothing anywhere. It reads typed text only: handwriting, images and PDF pages without selectable text cannot be analyzed."),
         el("div", { class: "smact" },
           el("button", { class: "btn small", type: "button", onclick: () => { ref.close(); sm.scan({ manual: true }); } }, "Check the open pages now"),
+          this.store.rejects.size ? el("button", { class: "btn small", type: "button", title: "Suggestions you dismissed (or that timed out) were remembered so they do not come back. This lets them be suggested again.", onclick: () => { const n = this.store.rejects.size; this.store.rejects.clear(); sm.snoozed.clear(); this.app.scheduleAutosave(); toast(`${n} dismissed suggestion${n === 1 ? "" : "s"} can be suggested again.`); box.replaceChildren(head(), smartBox(), list()); } }, `Bring back ${this.store.rejects.size} dismissed`) : null,
           nAuto ? el("button", { class: "btn small danger", type: "button", onclick: () => { const n = sm.removeAutomatic(); toast(`${n} automatic link${n === 1 ? "" : "s"} removed.`); box.replaceChildren(head(), smartBox(), list()); } }, `Remove ${nAuto} automatic link${nAuto === 1 ? "" : "s"}`) : null));
     };
     const head = () => el("p", { class: "lintro" }, "Links connect a note to the exact PDF page, region or text it is about. Press the chain mark on either end to jump to the other one.");

@@ -12,6 +12,9 @@ import * as PM from "./pagemove.js";
 import { RichEditor } from "./editor.js";
 import { sha256Hex } from "./workspace.js";
 import { PdfTextStore } from "./pdftext.js";
+import { prefs } from "./prefs.js";
+import * as S from "./selection.js";
+import { selectionMethods } from "./panelselection.js";
 import { el, icon, toast, dialog, popup, closePopup, paletteContent, customColorDialog, brushContent, paperContent } from "./ui.js";
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -38,9 +41,15 @@ const stepSize = (z, dir) => (dir > 0 ? SIZE_LADDER.find((x) => x > z + 0.01) ??
 const HANDLE_R = 7;                       // drawn handle radius (screen px)
 const MAX_IMAGE_SIDE = 2400;
 const GAP = 12;                      // space between pages in the continuous PDF view (page units)
-const RASTER_BUDGET = 40e6;          // max total pixels of cached page bitmaps (memory limit)
-const RASTER_MAX = 12;               // max cached page bitmaps
-const LAYER_BUDGET = 56e6, LAYER_MAX = 16;   // rendered notebook pages / annotation layers kept as bitmaps (pixels, count)
+let RASTER_BUDGET = 40e6;          // max total pixels of cached page bitmaps (memory limit)
+let RASTER_MAX = 12;               // max cached page bitmaps
+let LAYER_BUDGET = 56e6, LAYER_MAX = 16;   // rendered notebook pages / annotation layers kept as bitmaps (pixels, count)
+/** Memory saver (Settings): half the cached page bitmaps and a lower rendering resolution, for modest hardware. Panels redraw at the new settings. */
+let DPR_CAP = Infinity;
+export function setMemorySaver(on) {
+  RASTER_BUDGET = on ? 20e6 : 40e6; RASTER_MAX = on ? 6 : 12; LAYER_BUDGET = on ? 28e6 : 56e6; LAYER_MAX = on ? 8 : 16; DPR_CAP = on ? 1.5 : Infinity;
+}
+export const memoryLimits = () => ({ RASTER_BUDGET, RASTER_MAX, LAYER_BUDGET, LAYER_MAX, DPR_CAP });
 const freeCanvas = (c) => { try { c.width = c.height = 0; } catch { /* ignore */ } };
 
 export class Panel {
@@ -50,12 +59,12 @@ export class Panel {
     this.pages = kind === "nb" ? [{ paper: "lined", items: [] }] : kind === "board" ? [{ paper: "white", grid: false, items: [] }] : [];
     this.cur = 0; this.dirty = false; this.history = new M.History();
     this.view = { scale: 1, tx: 0, ty: 0, fit: kind !== "board", init: kind !== "board" };     // a board starts at 100 %, centred (see onResize)
-    this.cw = 300; this.ch = 300; this.dpr = window.devicePixelRatio || 1;
+    this.cw = 300; this.ch = 300; this.dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
     this.tool = "pen";
     this.groups = T.toolDefaults(kind);
     this.curStyle = { ...this.groups.pen };
     this.recent = [];
-    this.selected = null; this.live = null; this.preview = null; this.action = null;
+    this.selected = null; this.group = null; this.live = null; this.preview = null; this.action = null;
     this.editing = null; this.pointers = new Map(); this.gesture = null; this.lastPen = 0; this.lastTap = null;
     this.pdf = null; this.sizes = []; this.words = null; this.wordsPage = -1; this.pageToken = 0;
     // continuous PDF view: page layout + cached page bitmaps (only pages near the screen are rendered)
@@ -122,14 +131,14 @@ export class Panel {
       fileBar.append(this.b.open, this.b.save);
     } else if (this.kind === "board") {
       this.b.new = b("plus", "New", "New board", () => this.newBoard());
-      this.b.open = b("open", "Open", "Open a board (.dnboard)", () => this.pickFile(".dnboard,application/json,.json"));
-      this.b.save = b("save", "Save", "Save the board (.dnboard)", () => this.saveBoard());
+      this.b.open = b("open", "Open", "Open a board (.nfboard; older .dnboard files open too)", () => this.pickFile(".nfboard,.dnboard,application/json,.json"));
+      this.b.save = b("save", "Save", "Save the board (.nfboard)", () => this.saveBoard());
       this.b.export = b("pdf", "PDF", "Export the board as a PDF", () => this.exportBoard());
       fileBar.append(this.b.new, this.b.open, this.b.save, this.b.export);
     } else {
       this.b.new = b("plus", "New", "New notebook", () => this.newNotebook());
-      this.b.open = b("open", "Open", "Open a notebook (.dnote)", () => this.pickFile(".dnote,application/json,.json"));
-      this.b.save = b("save", "Save", "Save the notebook (.dnote)", () => this.saveNotebook());
+      this.b.open = b("open", "Open", "Open a notebook (.nfnote; older .dnote files open too)", () => this.pickFile(".nfnote,.dnote,application/json,.json"));
+      this.b.save = b("save", "Save", "Save the notebook (.nfnote)", () => this.saveNotebook());
       this.b.export = b("pdf", "PDF", "Export all pages as a PDF", () => this.exportNotebook());
       fileBar.append(this.b.new, this.b.open, this.b.save, this.b.export);
     }
@@ -434,7 +443,7 @@ export class Panel {
     const r = this.stage.getBoundingClientRect();
     if (this.root.hidden || r.width === 0 || r.height === 0) return;     // hidden panel (layout switch): keep its view exactly as it is
     this.cw = Math.max(50, Math.round(r.width)); this.ch = Math.max(50, Math.round(r.height));
-    this.dpr = window.devicePixelRatio || 1;
+    this.dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
     if (this.pendingCenter) { const c = this.pendingCenter; this.pendingCenter = null; this.applyCenter(c); }
     this.canvas.width = Math.round(this.cw * this.dpr); this.canvas.height = Math.round(this.ch * this.dpr);
     this.canvas.style.width = this.cw + "px"; this.canvas.style.height = this.ch + "px";
@@ -454,22 +463,29 @@ export class Panel {
     v.fit = true;
     if (doc) {
       v.tx = (this.cw - this.docW * v.scale) / 2;
-      v.ty = userAction ? margin - this.offs[this.vp] * v.scale : -topDoc * v.scale;
+      v.ty = userAction ? margin + this.barsInset() - this.offs[this.vp] * v.scale : -topDoc * v.scale;
       this.clampView();
-    } else { v.tx = (this.cw - w * v.scale) / 2; v.ty = margin; }
+    } else { v.tx = (this.cw - w * v.scale) / 2; v.ty = margin + (this.pageDims()[1] * v.scale + margin + this.barsInset() <= this.ch ? 0 : this.barsInset()); }
     if (userAction) { this.render(); this.scheduleRaster(); }
   }
+  /** Height of the floating toolbars (they lie over the top of the page area and wrap to two rows on a normal window). Pages are placed below them, so the top of a page is never hidden
+   *  under a toolbar button. The last known height is kept while the panel is hidden (a hidden element has no height). */
+  barsInset() {
+    const b = this.root.querySelector(".bars"), h = b && !b.hidden ? b.offsetHeight : 0;
+    if (h) this._barsH = h; else if (b && b.hidden) this._barsH = 0;
+    return this._barsH || 0;
+  }
   clampView(m = 80) {
-    const v = this.view, s = v.scale;
+    const v = this.view, s = v.scale, top = Math.max(m, this.barsInset() + 14);
     if (this.continuous() && this.offs) {                      // whole document = one tall column
       const dw = this.docW * s, dh = this.docH * s;
       v.tx = dw <= this.cw ? (this.cw - dw) / 2 : clamp(v.tx, this.cw - dw - m, m);
-      v.ty = dh <= this.ch - 16 ? clamp(v.ty, 8, this.ch - dh - 8) : clamp(v.ty, this.ch - dh - m, m);
+      v.ty = dh <= this.ch - 16 ? clamp(v.ty, 8, this.ch - dh - 8) : clamp(v.ty, this.ch - dh - m, top);
       return;
     }
     const [w, h] = this.pageDims(), pw = w * s, ph = h * s;
     v.tx = pw <= this.cw ? (this.cw - pw) / 2 : clamp(v.tx, this.cw - pw - m, m);
-    v.ty = ph <= this.ch - 16 ? clamp(v.ty, 8, this.ch - ph - 8) : clamp(v.ty, this.ch - ph - m, m);
+    v.ty = ph <= this.ch - 16 ? clamp(v.ty, 8, this.ch - ph - 8) : clamp(v.ty, this.ch - ph - m, top);
   }
   zoomAt(factor, cx, cy) {
     const old = this.view.scale, s = clamp(old * factor, this.minZoom, 6), k = s / old;
@@ -595,6 +611,7 @@ export class Panel {
   }
   /** Make page i the page that drawing / editing applies to. */
   setCur(i) {
+    if (i !== this.cur) this.app.sources?.refresh();
     if (i === this.cur) return false;
     this.cur = i; this.selected = null; this.live = null; this.preview = null;
     this.words = null; this.wordsPage = -1;
@@ -610,7 +627,7 @@ export class Panel {
     if (!this.offs) return;
     n = clamp(Math.round(n) || 0, 0, this.pages.length - 1);
     this.setCur(n); this.vp = n;
-    const margin = this.cw < 500 ? 6 : 14;
+    const margin = (this.cw < 500 ? 6 : 14) + this.barsInset();
     this.view.ty = margin - this.offs[n] * this.view.scale;
     this.clampView(); this.positionEditor();
     this.vpLock = { n, ty: this.view.ty, s: this.view.scale };
@@ -769,7 +786,7 @@ export class Panel {
   draw() {
     const ctx = this.ctx, d = this.dpr;
     ctx.setTransform(d, 0, 0, d, 0, 0);
-    ctx.fillStyle = "#c9ccd1"; ctx.fillRect(0, 0, this.cw, this.ch);
+    ctx.fillStyle = this.desk || (this.desk = getComputedStyle(this.stage).getPropertyValue("--desk").trim() || "#c9ccd1"); ctx.fillRect(0, 0, this.cw, this.ch);       // (the desk around the pages follows the theme)
     this.updateFmtUi(); this.updateFillUi(); this.updateMindUi();
     this.msg.hidden = this.hasPage;
     if (!this.hasPage) return;
@@ -820,6 +837,7 @@ export class Panel {
       this.app.links.draw(this, ctx, i, w, h);
       if (isCur && this.editing && this.editing.rich) this.drawRichCaret(ctx);
       if (isCur && this.selected !== null && list[this.selected]) this.drawSelection(ctx, list[this.selected]);
+      if (isCur) { const gi = this.action && this.action.type === "gmove" ? this.action.idxs : this.groupIdx(); if (gi.length) this.drawGroupSelection(ctx, list, gi); if (this.action && this.action.type === "marquee") this.drawMarquee(ctx); }
       ctx.restore();
     }
     if (flo && this.live && this.live[flo.idx]) {
@@ -832,6 +850,7 @@ export class Panel {
     ctx.restore();
     const list = this.drawList;
     const hs = this.handleSubject(list); if (hs) this.drawHandles(ctx, hs.d, hs.i);
+    this.updateSelBar();
   }
   /** The item the resize handles belong to: the selected one, or the node whose text is being typed (it can be resized without leaving the editor). None with the Link tool. */
   handleSubject(list = this.drawList) {
@@ -1062,7 +1081,7 @@ export class Panel {
     if (wasEditing) this.finishEdit();
     if (inEditor) return;
     e.preventDefault();
-    this.stage.setPointerCapture(e.pointerId);
+    try { this.stage.setPointerCapture(e.pointerId); } catch { /* a pointer that is already gone (some pen drivers, synthetic events): the stroke goes on without capture */ }
     const l = this.local(e);
     this.pointers.set(e.pointerId, { x: l.x, y: l.y, type: e.pointerType });
     if (wasEditing && this.pointers.size === 1 && !(onNodeHandle && this.selected !== null)) { this.action = { type: "none" }; return; }       // this tap only closes the editor (a press on a handle of the node just typed goes on to resize it)
@@ -1125,14 +1144,22 @@ export class Panel {
         this.action = { type: "resize", h, orig: this.items[this.selected], tbox: this.geom(this.selected, this.items), base: this.items.slice(), e: this.selInfo(this.items[this.selected], this.selected).e };
         return;
       }
-      const idx = this.hit(p);
+      const idx = this.hit(p), gi = this.groupIdx();
+      if (idx !== null && e.shiftKey) {                                                   // Shift+click: add the item to the selection / take it out
+        this.setSelection(S.toggleIn(this.selectionIdx(), idx)); this.action = { type: "none" }; return;
+      }
+      if (idx !== null && gi.includes(idx)) {                                             // an item of the selected group: the whole group moves
+        this.action = { type: "gmove", idxs: gi, origs: gi.map((i) => this.items[i]), p0: p, l0: l, moved: false, box: S.unionBounds(gi.map((i) => this.boundsOf(this.items[i]))) }; this.render(); return;
+      }
+      this.group = null;
       if (idx !== null) { this.selected = idx; this.action = { type: "move", idx, p0: p, orig: this.items[idx], moved: false, l0: l }; this.render(); }
-      else { this.selected = null; this.action = { type: "pan", last: l, tap: true, l0: l }; this.render(); }
+      else if (e.pointerType === "touch") { this.selected = null; this.action = { type: "pan", last: l, tap: true, l0: l }; this.render(); }      // (a finger drags the view)
+      else { this.selected = null; this.action = { type: "marquee", p0: p, p1: p, l0: l, hits: [], base: [] }; this.ui(); this.render(); }      // (mouse / pen: drag a rectangle round the items)
       return;
     }
     if (t === "pen" || t === "mark") {
       const c = this.clampP(p);
-      this.action = { type: "stroke", pts: [[c.x, c.y]] };
+      this.action = { type: "stroke", pts: [this.strokePoint(c, e)] };
       this.updateStrokePreview();
       return;
     }
@@ -1170,7 +1197,7 @@ export class Panel {
     if (a.type === "stroke") {
       for (const ev of evs) {
         const c = this.clampP(this.toPage(ev)), last = a.pts[a.pts.length - 1];
-        if (Math.hypot(c.x - last[0], c.y - last[1]) >= 0.4) a.pts.push([c.x, c.y]);
+        if (Math.hypot(c.x - last[0], c.y - last[1]) >= 0.4) a.pts.push(this.strokePoint(c, ev));
       }
       this.updateStrokePreview(); return;
     }
@@ -1184,6 +1211,18 @@ export class Panel {
       a.e = e;
       if (a.moved) this.dragMove(a, e);
       return;
+    }
+    if (a.type === "gmove") {
+      if (!a.moved && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 4) a.moved = true;
+      if (!a.moved) return;
+      const [pw, ph] = this.pageDims(), [dx, dy] = S.clampDelta(a.box, p.x - a.p0.x, p.y - a.p0.y, pw, ph);
+      a.dx = dx; a.dy = dy; this.live = this.items.slice();
+      a.idxs.forEach((i, k) => { this.live[i] = this.settle(M.translate(a.origs[k], dx, dy)); });
+      this.render(); return;
+    }
+    if (a.type === "marquee") {
+      a.p1 = p; a.hits = S.itemsInRect(this.items, [a.p0.x, a.p0.y, p.x, p.y], (d) => (d.t === "conn" ? null : this.boundsOf(d)));
+      this.render(); return;
     }
     if (a.type === "resize") {
       const c = this.clampP(p);
@@ -1212,7 +1251,8 @@ export class Panel {
       return;
     }
     if (a.type === "stroke") {
-      const pts = a.pts.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]);
+      const keepP = a.pts.length > 1 && a.pts.every((q) => q.length > 2) && Math.max(...a.pts.map((q) => q[2])) - Math.min(...a.pts.map((q) => q[2])) >= 0.08;     // (a mouse, or a pen pressed evenly: plain strokes)
+      const pts = a.pts.map(([x, y, p]) => (keepP ? [Math.round(x * 100) / 100, Math.round(y * 100) / 100, Math.round(p * 100) / 100] : [Math.round(x * 100) / 100, Math.round(y * 100) / 100]));
       const st = this.curStyle;
       this.commit([...this.items, { t: this.tool, pts, color: st.color, w: st.width, ...this.styleExtra() }]);
       return;
@@ -1240,6 +1280,19 @@ export class Panel {
         if (Math.hypot(dx, dy) >= 0.5) { if (a.float) this.dropImage(a, live[a.idx]); else this.commit(live, { keepSel: true, flowIdx: a.idx }); return; }
       }
       this.render(); this.tapSelect(a.idx, l); return;
+    }
+    if (a.type === "gmove") {
+      const live = this.live; this.live = null;
+      if (a.moved && live && (Math.abs(a.dx) >= 0.5 || Math.abs(a.dy) >= 0.5)) {
+        this.commit(live, { keepSel: true });
+        this.group = new Set(a.idxs.map((i) => this.items[i])); this.ui(); this.render(); return;       // (one undo step for the whole move; the moved items stay selected)
+      }
+      this.render(); if (!a.moved) { const h = this.hit(p); this.setSelection(h !== null ? [h] : []); }                  // (a click on a member of the group, without dragging: that item alone)
+      return;
+    }
+    if (a.type === "marquee") {
+      const small = Math.hypot(l.x - a.l0.x, l.y - a.l0.y) < 4;
+      this.setSelection(small ? [] : a.hits); return;
     }
     if (a.type === "resize") {
       const live = this.live; this.live = null;
@@ -1295,11 +1348,15 @@ export class Panel {
     this.tapSelect(null, null);
   }
   deleteSelected() {
-    if (this.selected === null || this.editing || this.action || !this.items[this.selected]) return false;
+    if (this.editing || this.action) return false;
+    const gi = this.groupIdx();
+    if (gi.length) { this.group = null; this.commit(this.items.filter((_, i) => !gi.includes(i))); return true; }       // the whole group is ONE undo step
+    if (this.selected === null || !this.items[this.selected]) return false;
     const items = this.items.slice(); items.splice(this.selected, 1);
     this.commit(items); return true;
   }
-  deselect() { if (this.selected !== null) { this.selected = null; this.render(); } }
+  deselect() { if (this.selected !== null || this.group) { this.selected = null; this.group = null; this.ui(); this.render(); } }
+
   async saveSeparately() { return this.kind === "pdf" ? this.saveAnnotated() : this.kind === "board" ? this.saveBoard() : this.saveNotebook(); }
   tapSelect(idx, l) {                       // double-tap on text / note edits it
     const now = performance.now(), prev = this.lastTap;
@@ -1389,6 +1446,11 @@ export class Panel {
     this.render();
   }
   /** The eraser's outline follows the pointer (mouse / pen hover, or the finger while erasing). */
+  /** A point of the stroke being drawn: page position, and the pressure when this is a stylus that reports it, the pen tool is used, the stroke is opaque and the preference is on. */
+  strokePoint(c, ev) {
+    const pr = this.tool === "pen" && prefs.get("pressure") && ev.pointerType === "pen" && ev.pressure > 0 && this.curStyle.alpha >= 255;
+    return pr ? [c.x, c.y, Math.min(1, Math.max(0.05, ev.pressure))] : [c.x, c.y];
+  }
   /** Who owns the pointer right now: "snip" (the Snipping Tool is choosing an area) or "link" (a link end is being picked) take the cursor over from the selected tool, whatever it is:
    *  the tool's own cursor overlay (the eraser's outline) is neither drawn nor tracked, and comes back by itself when the mode ends. null: the selected tool has it. */
   get cursorOwner() { const a = this.app; return a && a.snip && a.snip.active ? "snip" : a && a.links && a.links.picking ? "link" : null; }
@@ -1539,8 +1601,8 @@ export class Panel {
   }
   async saveBoard() {
     this.finishEdit();
-    const base = (this.name || "board").replace(/\.dnboard$/i, "");
-    await this.app.saveBlob(new Blob([M.boardToJson(this.pages[0])], { type: "application/json" }), `${base}.dnboard`);
+    const base = (this.name || "board").replace(/\.(nf|dn)board$/i, "");
+    await this.app.saveBlob(new Blob([M.boardToJson(this.pages[0])], { type: "application/json" }), `${base}.nfboard`);
     this.dirty = false; this.app.onChange(this, { clean: true }); this.ui();
     return true;
   }
@@ -1559,7 +1621,7 @@ export class Panel {
     const busy = this.app.busy("Exporting PDF…");
     try {
       const bytes = await PDF.exportBoardPdf(pg, { printFriendly });
-      await this.app.saveBlob(new Blob([bytes], { type: "application/pdf" }), `${(this.name || "board").replace(/\.dnboard$/i, "")}.pdf`);
+      await this.app.saveBlob(new Blob([bytes], { type: "application/pdf" }), `${(this.name || "board").replace(/\.(nf|dn)board$/i, "")}.pdf`);
     } catch (e) { console.error(e); toast("Could not export the PDF: " + (e.message || e), 5000); }
     finally { busy.done(); }
   }
@@ -2441,8 +2503,8 @@ export class Panel {
   }
   async saveNotebook() {
     this.finishEdit();
-    const base = (this.name || "notebook").replace(/\.dnote$/i, "");
-    await this.app.saveBlob(new Blob([M.notebookToJson(this.pages)], { type: "application/json" }), `${base}.dnote`);
+    const base = (this.name || "notebook").replace(/\.(nf|dn)note$/i, "");
+    await this.app.saveBlob(new Blob([M.notebookToJson(this.pages)], { type: "application/json" }), `${base}.nfnote`);
     this.dirty = false; this.app.onChange(this, { clean: true }); this.ui();
     return true;
   }
@@ -2451,7 +2513,7 @@ export class Panel {
     const busy = this.app.busy("Exporting PDF…");
     try {
       const bytes = await PDF.exportNotebookPdf(this.pages, (f) => busy.set(f));
-      await this.app.saveBlob(new Blob([bytes], { type: "application/pdf" }), `${(this.name || "notebook").replace(/\.dnote$/i, "")}.pdf`);
+      await this.app.saveBlob(new Blob([bytes], { type: "application/pdf" }), `${(this.name || "notebook").replace(/\.(nf|dn)note$/i, "")}.pdf`);
     } catch (e) { console.error(e); toast("Could not export the PDF: " + (e.message || e), 5000); }
     finally { busy.done(); }
   }
@@ -2514,7 +2576,15 @@ export class Panel {
   }
   setLabel(label) { this.label = label; this.ui(); }
 
+  /** A short description of the canvas for assistive technology (the content itself is drawn; the Sources panel lists the notes and their sources as text). */
+  describeStage() {
+    if (!this.stage) return;
+    const n = this.pages ? this.pages.length : 0, items = this.items ? this.items.length : 0;
+    this.stage.setAttribute("role", "application");
+    this.stage.setAttribute("aria-label", this.kind === "board" ? `${this.label || "Board"}, ${items} item${items === 1 ? "" : "s"}` : this.hasPage ? `${this.label || this.name || (this.kind === "pdf" ? "PDF" : "Notebook")}, page ${this.cur + 1} of ${n}, ${items} annotation${items === 1 ? "" : "s"}` : `${this.label || "PDF"}, nothing open`);
+  }
   ui() {
+    this.describeStage();
     const n = this.pages.length, has = this.hasPage;
     const name = this.name || (this.kind === "pdf" ? "no file" : "untitled");
     this.titleEl.replaceChildren(el("b", {}, this.label), " — " + name, this.dirty ? el("span", { class: "dirty" }, " •") : "");
@@ -2539,3 +2609,4 @@ export class Panel {
     if (this.toolBtns.hltext) this.toolBtns.hltext.disabled = !has;
   }
 }
+Object.assign(Panel.prototype, selectionMethods);                // (multi-selection and clipboard: panelselection.js)

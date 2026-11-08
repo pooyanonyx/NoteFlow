@@ -3,11 +3,18 @@ import * as M from "./model.js";
 import * as K from "./keys.js";
 import { initTouchTips } from "./tips.js";
 import * as WS from "./workspace.js";
-import { Panel } from "./panel.js";
+import { Panel, setMemorySaver } from "./panel.js";
 import { LinkController } from "./linkui.js";
 import { SearchUI } from "./searchui.js";
 import { SmartLink } from "./smartlink.js";
 import { SnipTool } from "./snip.js";
+import * as SF from "./savefile.js";
+import { openSettings } from "./settingsui.js";
+import { SourcesPanel } from "./sourcesui.js";
+import { Bookmarks } from "./bookmarks.js";
+import * as DX from "./diagnostics.js";
+import { prefs } from "./prefs.js";
+import * as SEL from "./selection.js";
 import { setImageLoadedCallback, bumpFontEpoch } from "./render.js";
 import { el, icon, toast, dialog, popup, closePopup } from "./ui.js";
 
@@ -18,15 +25,43 @@ const LAYOUTS = [["PDF Only", ["pdf"]], ["Notebook Only", ["nb"]], ["Board Only"
   ["PDF + Board", ["pdf", "board"]], ["Notebook + Board", ["nb", "board"]], ["PDF + Notebook + Board", ["pdf", "nb", "board"]]];
 
 // ------------------------------------------------------------- IndexedDB
+const DB_NAME = "noteflow", LEGACY_DB_NAME = "dualnote";
+/** The session database. Sessions saved before the product was renamed live in the "dualnote" database: on the first start under the new name they are copied over (and only then
+ *  is the old database removed), so an existing user loses nothing. If the copy fails the old database is left alone and keeps being used as a read-only fallback for the restore. */
+const openDb = (name) => new Promise((res, rej) => {
+  const r = indexedDB.open(name, 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("kv");
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+const idbAll = (db) => new Promise((res, rej) => {
+  const t = db.transaction("kv", "readonly"), s = t.objectStore("kv"), out = [], rq = s.openCursor();
+  rq.onsuccess = () => { const c = rq.result; if (c) { out.push([c.key, c.value]); c.continue(); } };
+  t.oncomplete = () => res(out); t.onerror = () => rej(t.error);
+});
+/** Is there a session database from before the rename? (Browsers without indexedDB.databases(): open it and see whether it had to be created, then remove what we created.) */
+async function legacyDbExists() {
+  if (indexedDB.databases) return (await indexedDB.databases()).some((d) => d.name === LEGACY_DB_NAME);
+  return new Promise((res) => {
+    const r = indexedDB.open(LEGACY_DB_NAME); let fresh = false;
+    r.onupgradeneeded = () => { fresh = true; };
+    r.onsuccess = () => { r.result.close(); if (fresh) indexedDB.deleteDatabase(LEGACY_DB_NAME); res(!fresh); };
+    r.onerror = () => res(false);
+  });
+}
+async function migrateLegacyDb(db) {
+  try {
+    if (!(await legacyDbExists())) return;
+    if ((await new Promise((res, rej) => { const t = db.transaction("kv", "readonly"), q = t.objectStore("kv").count(); q.onsuccess = () => res(q.result); t.onerror = () => rej(t.error); })) > 0) return;   // (already has data)
+    const old = await openDb(LEGACY_DB_NAME), rows = await idbAll(old);
+    await new Promise((res, rej) => { const t = db.transaction("kv", "readwrite"), s = t.objectStore("kv"); for (const [k, v] of rows) s.put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
+    old.close(); indexedDB.deleteDatabase(LEGACY_DB_NAME);
+  } catch (e) { console.warn("could not migrate the old session database", e); }
+}
 const idb = {
   db: null,
   open() {
     if (this.db) return this.db;
-    return (this.db = new Promise((res, rej) => {
-      const r = indexedDB.open("dualnote", 1);   // (the database keeps its old name so sessions saved before the rename are still found)
-      r.onupgradeneeded = () => r.result.createObjectStore("kv");
-      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
-    }));
+    return (this.db = openDb(DB_NAME).then(async (db) => { await migrateLegacyDb(db); return db; }));
   },
   async tx(mode, fn) {
     const db = await this.open();
@@ -48,6 +83,8 @@ export class App {
       board: new Panel(this, "board", "board", "Board"), board2: new Panel(this, "board2", "board", "Board 2") };
     this._partIds = new WeakMap(); this._written = new Set();
     this.autosaveOk = true; this.restoring = false; this.autosaveTimer = 0; this.wsName = null; this.installEvt = null;
+    this.fileHandle = null; this.fileSaving = false; this.fileSavedAt = 0; this.fileError = null; this.fileTimer = 0;       // the workspace file this work is saved into (when the browser allows it)
+    this.autosavePaused = false; this.autosaveError = null; this.fileSaveDelay = 30000;
     setImageLoadedCallback(() => { for (const p of Object.values(this.panels)) p.render(); });
     // the bundled Persian font is used by the canvas too: redraw once it has loaded
     document.fonts?.addEventListener?.("loadingdone", () => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); });         // text is measured again with the real font
@@ -55,6 +92,7 @@ export class App {
     this.buildDom();
     this.search = new SearchUI(this);
     this.smart = new SmartLink(this);
+    this.bookmarks = new Bookmarks(); this.bookmarks.onChange(() => this.scheduleAutosave());
     this.snip = new SnipTool(this);
     this.linksCount = el("span", { class: "lcount", hidden: true }); this.linksBtn.append(this.linksCount);          // (how many links there are)
     const upd = () => { const n = this.links.store.size; this.linksCount.textContent = String(n); this.linksCount.hidden = !n; };
@@ -70,16 +108,24 @@ export class App {
     window.addEventListener("blur", () => this.endTempHand());
     document.addEventListener("visibilitychange", () => { if (document.hidden) this.endTempHand(); });
     document.addEventListener("paste", (e) => this.onPaste(e));
+    document.addEventListener("copy", (e) => this.onCopyCut(e, false));
+    document.addEventListener("cut", (e) => this.onCopyCut(e, true));
     document.addEventListener("dragover", (e) => { e.preventDefault(); });
     document.addEventListener("drop", (e) => this.onDrop(e));
     window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); this.installEvt = e; this.installBtn.hidden = false; });
+    DX.install((entry) => this.onUnexpectedError(entry));
+    this.applyAppearance();
+    this.applyMemoryMode();
+    prefs.onChange((k) => { if (k === "memorySaver") this.applyMemoryMode(); if (k === "theme" || k === "motion") this.applyAppearance(); if (k === "autoSaveFile") this.scheduleFileSave(); });
+    try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (prefs.get("theme") === "system") this.applyAppearance(); }); } catch { /* old browser */ }
+    this.refreshSaveStatus();
     this.setActive(this.panels.pdf);
   }
 
   // --------------------------------------------------------------------- DOM
   buildDom() {
     const b = (ic, label, title, fn, cls = "") => el("button", { class: "btn " + cls, type: "button", title, "aria-label": title, onclick: fn }, icon(ic), el("span", { class: "lbl" }, label));
-    this.wsOpenInput = el("input", { type: "file", accept: ".dnws,application/zip", hidden: true, onchange: () => this.onWorkspaceFile() });
+    this.wsOpenInput = el("input", { type: "file", accept: ".nfws,.dnws,application/zip", hidden: true, onchange: () => this.onWorkspaceFile() });
     this.layoutBtn = b("layout", "Layout", "Choose the workspace layout (which panels it has)", () => this.openLayoutMenu());
     this.switchBtn = b("swap", "Switch", "Swap the left and right panels (nothing is closed or lost)", () => this.switchSides());
     this.seg = el("div", { class: "seg", role: "tablist" });
@@ -87,17 +133,21 @@ export class App {
     this.installBtn.hidden = true;
     this.top = el("header", { class: "topbar" },
       el("span", { class: "brand" }, "NoteFlow"),
-      b("open", "Open workspace", "Open a workspace file (.dnws)", () => this.wsOpenInput.click()),
-      b("save", "Save workspace", "Save everything (PDF, annotations, notebooks) in one file (" + K.MOD + "+S)", () => this.saveWorkspace()),
+      b("open", "Open workspace", "Open a workspace file (.nfws; older .dnws files open too)", () => this.openWorkspaceDialog()),
+      b("save", "Save workspace", "Save everything (PDF, annotations, notebooks) in one file (" + K.MOD + "+S). Ctrl+Alt+S: save under a new name.", () => this.saveWorkspace()),
+      this.saveStat = el("button", { class: "savestat", type: "button", "data-state": "none", hidden: true, onclick: () => this.onSaveStatusClick() }),
       b("plus", "New", "Start a new empty workspace", () => this.newWorkspace()),
       b("search", "Search", "Search everywhere: notebooks, PDFs, boards (" + K.MOD + "+Shift+F)", () => this.search.toggle()),
       b("snip", "Snip", "Snipping tool: capture an area of a PDF page, a notebook page or the board, then copy it or insert it into another panel (" + K.MOD + "+Shift+S)", () => this.snip.toggle()),
       this.linkBtn = b("chain", "Link", "Link two things: a note, text box or drawing with a PDF page, region or text. Select the note first, or just press Link.", () => this.startLink()),
+      this.sourcesBtn = b("toc", "Sources", "Side panel: the sources of the page you are on (which PDF passages your notes cite, which notes cite this page), page thumbnails, and the PDF outline with your bookmarks", () => this.sources.toggle()),
       this.linksBtn = b("list", "Links", "All links between notes and PDFs: see, open or remove them, and the Smart linking settings", () => this.links.manage()),
       el("span", { class: "gap" }), this.layoutBtn, this.switchBtn, this.seg, this.installBtn,
+      b("gear", "", "Settings: appearance, saving, pen, performance", () => this.openSettings(), "icon-only"),
       b("menu", "", "Help", () => this.help(), "icon-only"), this.wsOpenInput);
     this.main = el("main", { class: "main" });
     for (const k of Object.keys(this.panels)) this.main.append(this.panels[k].root);
+    this.sources = new SourcesPanel(this);                                   // (docked after the panels, hidden until opened)
     this.busyBox = el("div", { class: "busy", hidden: true }, el("div", { class: "busybox" }, el("div", { class: "spin" }), el("div", { class: "busymsg" }), el("div", { class: "bar2" }, el("div", { class: "fill" }))));
     this.root.append(this.top, this.main, this.busyBox);
   }
@@ -127,7 +177,7 @@ export class App {
   }
   setTab(i) { this.tab = i; this.viewMode = i === 0 ? "left" : i === 1 ? "right" : "both"; this.refreshLayout(); this.scheduleAutosave(); }
   setView(mode) { this.setTab(mode === "right" ? 1 : 0); }          // (older name)
-  setActive(p) { if (this.active === p) return; this.active = p; for (const q of Object.values(this.panels)) q.root.classList.toggle("active", q === p); }
+  setActive(p) { if (this.active === p) return; this.active = p; for (const q of Object.values(this.panels)) q.root.classList.toggle("active", q === p); this.sources?.refresh(); }
   openLayoutMenu() {
     const row = (label, on, fn) => el("button", { class: "mi" + (on ? " on" : ""), type: "button", role: "menuitemradio", "aria-checked": String(on), onclick: fn },
       el("span", { class: "chk" }, on ? "✓" : ""), label);
@@ -239,8 +289,27 @@ export class App {
       toast("Paste is not allowed here. Press Ctrl+V, or use the Image button to pick a picture.", 5000);
     }
   }
-  onPaste(e) {
+  /** Copy / Cut of the selected items (not while typing in a text field, which keeps its own text clipboard): a marker goes on the clipboard, the items stay in memory. */
+  onCopyCut(e, cut) {
     const t = e.target;
+    if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) return;
+    if (window.getSelection && String(window.getSelection()).length) return;           // text selected on the page (a dialog, the help): an ordinary copy
+    const p = this.active; if (!p || !p.hasSelection()) return;
+    const items = p.selectionPayload(); if (!items.length) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", SEL.setBuffer(items, p.kind));
+    if (cut) p.deleteSelected();
+    toast(cut ? "Cut" : "Copied", 1200);
+  }
+  onPaste(e) {
+    const t = e.target, clip = e.clipboardData?.getData("text/plain");
+    if (SEL.isMarker(clip)) {                                                          // the clipboard holds items copied inside NoteFlow
+      e.preventDefault();
+      if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) return;      // (not pasted as text into a text field)
+      const buf = SEL.bufferFor(clip), p = this.active;
+      if (buf && p && p.hasPage) { buf.pastes++; p.pasteItems(JSON.parse(JSON.stringify(buf.items)), 16 * buf.pastes); }
+      return;
+    }
     if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;           // normal text paste
     const items = [...(e.clipboardData?.items || [])];
     const img = items.find((i) => i.kind === "file" && i.type.startsWith("image/"));
@@ -259,16 +328,18 @@ export class App {
   async onDrop(e) {
     e.preventDefault();
     const at = this.panelAt(e.clientX, e.clientY);
+    const handles = new Map();                                                // (Chromium: a dropped file can come with a handle, so Save writes back into it)
+    try { for (const it of e.dataTransfer?.items || []) if (it.kind === "file" && it.getAsFileSystemHandle) { const h = await it.getAsFileSystemHandle(); if (h && h.kind === "file") handles.set(h.name, h); } } catch { /* ignore */ }
     for (const f of e.dataTransfer?.files || []) {
       const n = f.name.toLowerCase();
-      if (n.endsWith(".dnws")) await this.openWorkspaceFile(f);
+      if (n.endsWith(".nfws") || n.endsWith(".dnws")) await this.openWorkspaceFile(f, handles.get(f.name) || null);
       else if (n.endsWith(".pdf") || f.type === "application/pdf") {
         const p = at && at.kind === "pdf" && this.order.includes(at.key) ? at : await this.ensurePanelOfKind("pdf");
         if (p && await this.confirmReplace(p, "open another PDF")) await p.openPdfBytes(new Uint8Array(await f.arrayBuffer()), f.name);
-      } else if (n.endsWith(".dnboard")) {
+      } else if (n.endsWith(".nfboard") || n.endsWith(".dnboard")) {
         const p = at && at.kind === "board" && this.order.includes(at.key) ? at : await this.ensurePanelOfKind("board");
         if (p && await this.confirmReplace(p, "open another board")) { try { p.setBoard(M.parseBoard(await f.text()), f.name); } catch (err) { toast(err.message, 4000); } }
-      } else if (n.endsWith(".dnote")) {
+      } else if (n.endsWith(".nfnote") || n.endsWith(".dnote")) {
         const p = at && at.kind === "nb" && this.order.includes(at.key) ? at : await this.ensurePanelOfKind("nb");
         if (p && await this.confirmReplace(p, "open another notebook")) { try { p.setNotebook(M.parseNotebook(await f.text()), f.name); } catch (err) { toast(err.message, 4000); } }
       } else if (f.type.startsWith("image/")) {
@@ -294,6 +365,7 @@ export class App {
     const t = e.target, p = this.active, mod = e.ctrlKey || e.metaKey, key = K.keyName(e);
     if (document.querySelector(".backdrop")) return;                            // a dialog is open: it owns the keyboard (it handles its own Escape)
     if (mod && !e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveWorkspace(); return; }
+    if (mod && e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveWorkspace({ as: true }); return; }
     if (mod && !e.altKey && e.shiftKey && key === "f") { e.preventDefault(); this.search.toggle(); return; }
     if (mod && !e.altKey && e.shiftKey && key === "s") { e.preventDefault(); this.snip.toggle(); return; }
     if (K.isTextField(t)) return;                                               // typing: Space, letters, Ctrl+Z (text undo) ... are the browser's
@@ -303,6 +375,8 @@ export class App {
     if (e.altKey && !mod && /^[1-9]$/.test(key)) { e.preventDefault(); this.focusPanel(+key - 1); return; }
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); p?.goto(p.shown() - 1); return; }
     if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); p?.goto(p.shown() + 1); return; }
+    if (mod && !e.altKey && !e.shiftKey && key === "a") { if (p?.selectAll()) e.preventDefault(); return; }          // select every item of the page
+    if (mod && !e.altKey && !e.shiftKey && key === "d") { if (p?.duplicateSelection()) e.preventDefault(); return; }     // duplicate the selection (also stops the browser's "bookmark" shortcut)
     if (mod && !e.altKey) {                                                     // undo / redo use the panel's own history (and ignore a stroke in progress)
       if (key === "z") { e.preventDefault(); if (e.shiftKey) p?.redo(); else p?.undo(); return; }
       if (key === "y" && !e.shiftKey) { e.preventDefault(); p?.redo(); return; }
@@ -345,7 +419,7 @@ export class App {
   // ----------------------------------------------------------- workspace
   onChange(panel, info = {}) {
     if (info.clean) panel.ui();
-    this.links.touch(); this.links.sweep(); this.search.contentChanged();          // (sweep: links whose item was deleted are deleted with it)
+    this.links.touch(); this.links.sweep(); this.search.contentChanged(); this.sources?.refresh();          // (sweep: links whose item was deleted are deleted with it)
     this.scheduleAutosave();
   }
   /** The Link button (top bar): linking starts from what is selected in the active panel; when that panel has nothing selected but exactly one other visible panel has, from that one. */
@@ -371,7 +445,7 @@ export class App {
   isPristine(p) { return !p.dirty && !p.name && p.pages.length === 1 && !p.items.length; }
   settings() {
     const P = this.panels;
-    return { window: { layout: [...this.order], view: this.viewMode, tab: this.tab, type: M.workspaceTypeOf(this.order) || "custom" }, board: P.board.viewState(), board2: P.board2.viewState(), pdf: P.pdf.viewState(), pdf2: P.pdf2.viewState(), notebook: P.nb.viewState(), notebook2: P.nb2.viewState(), smartLinking: this.smart.mode };
+    return { window: { layout: [...this.order], view: this.viewMode, tab: this.tab, type: M.workspaceTypeOf(this.order) || "custom" }, board: P.board.viewState(), board2: P.board2.viewState(), pdf: P.pdf.viewState(), pdf2: P.pdf2.viewState(), notebook: P.nb.viewState(), notebook2: P.nb2.viewState(), smartLinking: this.smart.mode, bookmarks: this.bookmarks.toJSON() };
   }
   nbPages(p) { p.finishEdit(); return p.pages.map((q) => M.pageToJson(q)); }
   /** What belongs to the workspace. Default: only the panels of the current structure (a PDF-only workspace has no notebook, and vice versa).
@@ -385,14 +459,90 @@ export class App {
       board2: this.order.includes("board2") || (all && !this.isPristine(P.board2)) ? P.board2.boardData() : null,
       settings: this.settings(), type: M.workspaceTypeOf(this.order) || "custom", links: this.links.store.toJSON() };
   }
-  async saveWorkspace() {
-    const busy = this.busy("Saving workspace…");
+  /** Save the workspace. In a browser that can write into a chosen file (File System Access API) the first save asks where, every later save overwrites that same file;
+   *  elsewhere it downloads a copy, as before. { as: true } always asks for a new name; { silent: true } is the automatic save (no progress box, no notice, never asks). */
+  async saveWorkspace({ as = false, silent = false } = {}) {
+    if (this.fileSaving) return false;
+    if (silent && (!this.fileHandle || Object.values(this.panels).some((p) => p.editing))) return false;
+    this.fileSaving = true; this.refreshSaveStatus();
+    const busy = silent ? null : this.busy("Saving workspace…");
     try {
       const blob = await WS.writeWorkspace(this.collect());
-      await this.saveBlob(blob, this.wsName || "workspace.dnws");
+      const native = globalThis.Capacitor && globalThis.Capacitor.isNativePlatform && globalThis.Capacitor.isNativePlatform();
+      if (SF.canSaveInPlace() && !native) {
+        let h = !as ? this.fileHandle : null;
+        if (h && !(await SF.hasWritePermission(h, { ask: !silent }))) { if (silent) return false; h = null; }       // (after a reload the browser asks again; refused: save under a name)
+        if (!h) {
+          if (silent) return false;
+          h = await SF.pickSaveHandle(SF.suggestName(this.wsName));
+          if (!h) return false;                                                                                      // cancelled: nothing changed
+        }
+        await SF.writeToHandle(h, blob);
+        this.fileHandle = h; this.wsName = h.name;
+        if (!silent) toast(`Saved to “${h.name}”`);
+      } else { await this.saveBlob(blob, SF.suggestName(this.wsName)); this.wsName = SF.suggestName(this.wsName); }
       for (const [k, p] of Object.entries(this.panels)) { if (this.order.includes(k)) p.dirty = false; p.ui(); }    // panels outside the workspace were not saved
-    } catch (e) { console.error(e); toast("Could not save the workspace: " + (e.message || e), 5000); }
-    finally { busy.done(); }
+      this.fileSavedAt = Date.now(); this.fileError = null;
+      return true;
+    } catch (e) {
+      console.error(e); DX.record("save", e);
+      this.fileError = e.message || String(e);
+      if (!silent) toast("Could not save the workspace: " + this.fileError + " Your work is still kept on this device.", 6000);
+      return false;
+    } finally { this.fileSaving = false; if (busy) busy.done(); this.refreshSaveStatus(); }
+  }
+  /** Colour theme (system / light / dark) and reduced motion, from the preferences. */
+  applyAppearance() {
+    const dark = prefs.get("theme") === "dark" || (prefs.get("theme") === "system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const root = document.documentElement; root.dataset.theme = dark ? "dark" : "light"; root.dataset.motion = prefs.get("motion") === "reduce" ? "reduce" : "";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#0d1014" : "#1f2937");
+    for (const p of Object.values(this.panels)) { p.desk = null; p.caretColor = null; p.render(); }
+  }
+  openSettings() { return openSettings(this); }
+  async clearBackup() {
+    const keys = await idb.keys?.() || [];
+    for (const k of keys) if (k === "session" || /^(pg|pdf|ptxt):/.test(String(k))) await idb.del(k);
+    this._written.clear(); this._partIds = new WeakMap();
+  }
+  applyMemoryMode() {
+    setMemorySaver(prefs.get("memorySaver"));
+    for (const p of Object.values(this.panels)) { p.onResize(); p.render(); p.scheduleRaster?.(); }
+  }
+  /** What the save indicator says: whether the work is in a file, and whether it is at least backed up on this device. */
+  saveStatus() {
+    const dirty = this.anyDirty(), file = this.fileHandle ? this.wsName : null;
+    const backup = this.autosavePaused ? "Not backed up on this device (the last session could not be restored)" : !this.autosaveOk ? "NOT backed up on this device: " + (this.autosaveError || "the browser refused to store it") : "backed up on this device";
+    const warn = this.autosavePaused || !this.autosaveOk;
+    if (this.fileSaving) return { state: "saving", label: "Saving…", tip: "Saving the workspace…" };
+    if (this.fileError && dirty) return { state: "error", label: "Not saved", tip: `The last save failed (${this.fileError}). Click to try again; ${backup}.` };
+    if (warn && dirty) return { state: "error", label: "Not backed up", tip: `${backup}. Save the workspace to a file now (click here).` };
+    if (dirty) return { state: "dirty", label: file ? "Unsaved changes" : "Not saved to a file", tip: `${file ? "Changes since the last save of “" + file + "”" : "This work is not in a file yet"}; ${backup}. Click to save (${K.MOD}+S).` };
+    if (file && this.fileSavedAt) return { state: "saved", label: "Saved", tip: `Saved in “${file}” at ${new Date(this.fileSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` };
+    return { state: "none", label: "", tip: "" };
+  }
+  refreshSaveStatus() {
+    const st = this.saveStatus(), b = this.saveStat; if (!b) return;
+    b.hidden = !st.label; b.dataset.state = st.state; b.textContent = st.label; b.title = st.tip; b.setAttribute("aria-label", "Save status: " + st.tip);
+  }
+  onSaveStatusClick() { this.saveWorkspace(); }
+  /** After a pause, also write the changes into the workspace file (opt-in: it rewrites the whole file, PDF included). Only into a file the user already chose and allowed. */
+  scheduleFileSave() {
+    clearTimeout(this.fileTimer);
+    if (!prefs.get("autoSaveFile") || !this.fileHandle) return;
+    this.fileTimer = setTimeout(async () => { if (this.anyDirty()) await this.saveWorkspace({ silent: true }); }, this.fileSaveDelay);
+  }
+  onUnexpectedError(entry) {
+    const safe = this.autosaveOk && !this.autosavePaused;
+    toast(safe ? "Something went wrong. Your work is backed up on this device; if it keeps happening, save the workspace and reload." : "Something went wrong, and your work is NOT backed up. Save the workspace to a file now.", 7000);
+    try { this.flushAutosave(); } catch { /* ignore */ }
+  }
+  async openWorkspaceDialog() {
+    if (SF.canPickToOpen()) {
+      try {
+        const r = await SF.pickOpenHandle(); if (!r) return;
+        await this.openWorkspaceFile(r.file, r.handle);
+      } catch (e) { DX.record("open", e); toast("Could not open the file: " + (e.message || e), 5000); }
+    } else this.wsOpenInput.click();
   }
   async confirmDiscard() {
     if (!this.anyDirty()) return true;
@@ -405,18 +555,21 @@ export class App {
   async newWorkspace() {
     if (!(await this.confirmDiscard())) return;
     await this.restore({ pdf: null, pdf2: null, notebook: [{ paper: "lined", items: [] }], notebook2: null, settings: {} });
-    this.wsName = null;
+    this.wsName = null; this.fileHandle = null; this.fileSavedAt = 0; this.fileError = null; this.autosavePaused = false; this.refreshSaveStatus();
     try { await idb.del("session"); } catch { /* ignore */ }
   }
   async onWorkspaceFile() { const f = this.wsOpenInput.files[0]; this.wsOpenInput.value = ""; if (f) await this.openWorkspaceFile(f); }
-  async openWorkspaceFile(file) {
+  async openWorkspaceFile(file, handle = null) {
     if (!(await this.confirmDiscard())) return false;
     const busy = this.busy("Opening workspace…");
     try {
       const ws = await WS.readWorkspace(await file.arrayBuffer());
       await this.restore(ws);
       this.wsName = file.name;
-      toast("Workspace opened.");
+      // a workspace of the current kind is saved back into the same file; an older (.dnws) one is never overwritten by a file in the new format (the first save asks for a name)
+      this.fileHandle = handle && SF.isCurrentWorkspaceName(file.name) ? handle : null; this.fileSavedAt = this.fileHandle ? Date.now() : 0; this.fileError = null;
+      this.refreshSaveStatus();
+      toast(handle && !this.fileHandle ? "Workspace opened. It was saved by an older version: saving asks for a new file name and leaves the original untouched." : "Workspace opened.", handle && !this.fileHandle ? 5000 : 2600);
       return true;
     } catch (e) { toast(e.message || "Could not open this workspace.", 5000); return false; }
     finally { busy.done(); }
@@ -447,6 +600,7 @@ export class App {
     // workspace type from the file's metadata; older files have none: their saved layout is used (PDF + Notebook when nothing is saved)
     let order = M.layoutOfType(ws.type ?? ws.manifest?.workspace_type) || M.sanitizeLayout(win.layout);
     if (order.includes("nb2") && !ws.notebook2) order = [...M.DEFAULT_LAYOUT];
+    this.bookmarks.load(st.bookmarks);                                       // (workspaces from before bookmarks have none)
     this.smart.setMode(typeof st.smartLinking === "string" ? st.smartLinking : "off", { silent: true });          // (Smart linking is off unless the workspace says otherwise)
     this.order = order; this.viewMode = M.normalizeView(win.view ?? "both", order);
     this.tab = Number.isInteger(win.tab) ? Math.max(0, Math.min(order.length - 1, win.tab)) : (win.view === "right" ? 1 : 0);
@@ -457,7 +611,7 @@ export class App {
   }
 
   // ------------------------------------------------------------- autosave
-  scheduleAutosave() { clearTimeout(this.autosaveTimer); this.autosaveTimer = setTimeout(() => this.autosave(), 2500); }
+  scheduleAutosave() { clearTimeout(this.autosaveTimer); this.autosaveTimer = setTimeout(() => this.autosave(), 2500); this.scheduleFileSave(); this.refreshSaveStatus(); }
   flushAutosave() { if (this.autosaveTimer) { clearTimeout(this.autosaveTimer); this.autosave(true); } }
   /** Id under which the items of a page are kept in the session backup. Items are never edited in place (an edit makes a new array), so an unchanged page keeps its id. */
   partId(items) {
@@ -468,6 +622,7 @@ export class App {
   /** The session backup is written page by page: only pages whose items changed since the last backup are written again (a large notebook is not copied in full every few seconds). */
   async autosave(force = false) {
     this.autosaveTimer = 0;
+    if (this.autosavePaused) { this.refreshSaveStatus(); return; }               // (an old session that could not be restored is still stored: it is not overwritten until the user decides)
     // collecting the data closes any open text editor: never do that in the middle of typing (wait until the user is done)
     if (!force && Object.values(this.panels).some((p) => p.editing)) { this.scheduleAutosave(); return; }
     try {
@@ -493,8 +648,14 @@ export class App {
         if ((s.startsWith("pdf:") || s.startsWith("ptxt:")) && !keep.has(k)) await idb.del(k);          // (ptxt: = the text of a PDF, kept for search)
         else if (s.startsWith("pg:") && !used.has(s)) { await idb.del(k); this._written.delete(s); }
       }
-      this.autosaveOk = true;
-    } catch (e) { console.warn("autosave failed", e); this.autosaveOk = false; this._written.clear(); }
+      this.autosaveOk = true; this.autosaveError = null;
+    } catch (e) {
+      console.warn("autosave failed", e); DX.record("autosave", e); this._written.clear();
+      const was = this.autosaveOk; this.autosaveOk = false;
+      this.autosaveError = e && e.name === "QuotaExceededError" ? "this device is out of storage space" : (e && e.message) || "the browser refused to store it";
+      if (was) toast("Could not back up your work on this device (" + this.autosaveError + "). Save the workspace to a file.", 7000);
+    }
+    this.refreshSaveStatus();
   }
   async restoreAutosave() {
     try {
@@ -523,7 +684,15 @@ export class App {
       for (const p of Object.values(this.panels)) { p.dirty = p.pages.some((q) => q.items.length > 0); p.ui(); }
       toast("Your last session was restored.");
       return true;
-    } catch (e) { console.warn("could not restore the last session", e); return false; }
+    } catch (e) {
+      console.warn("could not restore the last session", e); DX.record("restore", e);
+      // the stored session is kept and is NOT overwritten by the next automatic backup until the user decides
+      this.autosavePaused = true; this.refreshSaveStatus();
+      const c = await dialog({ title: "Your last session could not be restored", content: "The backup of your last session on this device is damaged or incomplete (" + (e && e.message || "unknown error") + "). It has not been deleted. You can start with an empty workspace, or keep the backup untouched for now (automatic backup stays off until you start a new workspace).",
+        buttons: [{ label: "Keep the backup, work without backup", value: "keep" }, { label: "Discard it and start fresh", value: "fresh", danger: true, primary: true }] });
+      if (c === "fresh") { try { await idb.del("session"); } catch { /* ignore */ } this.autosavePaused = false; this.refreshSaveStatus(); }
+      return false;
+    }
   }
 }
 

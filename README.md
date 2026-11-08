@@ -144,12 +144,30 @@ The toolbars float on top of your work, so opening and closing them never makes 
 
 ## Your work stays yours
 
-- **Save workspace** puts your PDF, annotations, notebooks and boards into **one file**, so you can close everything and continue later.
-- **Automatic backup.** NoteFlow also keeps your session on your device, so an accidental refresh does not lose your work.
-- **Export** to PDF from the PDF panel, the notebook and the board.
+- **Save workspace** puts your PDF, annotations, notebooks and boards into **one file** (`.nfws`), so you can close everything and continue later. In Chrome, Edge and other Chromium browsers the first save asks where; every later save (`Ctrl+S`) **overwrites that same file**. `Ctrl+Alt+S` saves under a new name. Elsewhere, Save downloads a copy.
+- **A save indicator** next to Save says whether your work is in a file (*Saved*, *Unsaved changes*, *Not saved to a file*) and warns in red if it could not be saved or backed up.
+- **Automatic backup.** NoteFlow also keeps your session on your device, so an accidental refresh does not lose your work. If a backup cannot be read, it is **kept, not overwritten**, until you decide what to do.
+- **Export** to PDF from the PDF panel, the notebook and the board. Pen strokes, marker strokes and text highlights are written as **real PDF annotations** (visible in any PDF viewer); text, shapes and images are drawn on the page, and your editable NoteFlow data travels inside the file.
+- **Older files keep working.** Workspaces, notebooks, boards and annotated PDFs saved before NoteFlow was renamed (`.dnws`, `.dnote`, `.dnboard`) open as before; they are saved in the new format (`.nfws`, `.nfnote`, `.nfboard`) under a new name, and the original is never overwritten. Your automatic backup moves over by itself.
 - **Private by design.** NoteFlow runs in your browser. Your documents are not uploaded anywhere.
 
 ---
+
+## Select, copy and arrange
+
+With the **Select** tool, drag a rectangle round items to select them (or `Shift+click` to add and remove, `Ctrl+A` for the whole page). Drag any selected item to move the group; a small bar offers **Duplicate** and **Delete**. `Ctrl+C`, `Ctrl+X`, `Ctrl+V` and `Ctrl+D` copy, cut, paste and duplicate (also into another panel); links stay with the original, and mind-map branches keep their connectors. Each action is one undo step. A finger still drags the view.
+
+## Sources, pages and bookmarks
+
+The **Sources** button opens a side panel that follows the page you are on:
+
+- **Sources**: on a PDF page, the notes that cite it (page, region or passage) and the other pages that have notes; on a notebook page, the sources its notes cite, and long notes that cite nothing yet. **Quote a passage** lets you drag across PDF text and puts it into your notes as a quote, already linked to where it came from.
+- **Pages**: thumbnails of every page, drawn only when they scroll into view (a limited number are kept in memory), with badges for links and bookmarks.
+- **Outline**: your **bookmarks** (saved in the workspace) and the PDF's own table of contents.
+
+## Settings
+
+The gear button opens **Settings**: theme (system, light, dark), reduced motion, saving into the file automatically, pen pressure, Smart linking, a **Memory saver** for modest hardware, and troubleshooting (copy a diagnostic log, reset settings, clear this device's backup). Settings belong to the device, not to the workspace file.
 
 ## Faster with the keyboard
 
@@ -165,6 +183,8 @@ Single keys switch tools while you are not typing, so letters and spaces always 
 | Hold `Space` | Temporary Hand tool, then back to your tool |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo (`⌘` on a Mac) |
 | `+` / `-` / `0` | Zoom in / out / fit |
+| `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` / `Ctrl+D` | Select all / copy / cut / paste / duplicate items |
+| `Ctrl+S` / `Ctrl+Alt+S` | Save workspace / save under a new name |
 | `Tab` / `Enter` | Mind map: add a child / add a sibling |
 
 Press `?` any time to see the full list.
@@ -219,6 +239,14 @@ NoteFlow has no build step: it is plain ES modules served as static files (`pyth
 | Text continuing across pages (pure) | `js/flow.js` |
 | Per-tool default settings (used by the toolbar and by *Reset to default*) | `js/tools.js` |
 | Toolbar, editing, pages, page-bitmap cache | `js/panel.js` |
+| Several items selected, copy / paste / duplicate (the panel methods) | `js/panelselection.js` |
+| Selection rectangles, copies, the copy buffer (pure) | `js/selection.js` |
+| Saving into a chosen file (File System Access API) | `js/savefile.js` |
+| Uncaught-error log (local only) | `js/diagnostics.js` |
+| App preferences (theme, pen pressure, memory saver…) and the Settings dialog | `js/prefs.js`, `js/settingsui.js` |
+| Side panel: Sources, Pages (thumbnails), Outline; its data | `js/sourcesui.js`, `js/sourcesmodel.js`, `js/pdfnav.js`, `js/bookmarks.js` |
+| Smart linking: matching (worker), suggestions | `js/similar.js`, `js/similar.worker.js`, `js/matcher.js`, `js/smartlink.js` |
+| Real PDF annotations on export (pure part) | `js/pdfnative.js`, `js/pdfio.js` |
 | Workspace, autosave, shortcuts | `js/app.js`, `js/workspace.js`, `js/keys.js` |
 
 ### Tests
@@ -227,11 +255,14 @@ NoteFlow has no build step: it is plain ES modules served as static files (`pyth
 npm test                  # unit tests + browser tests
 npm run test:unit         # node:test, no dependencies (Node 20+)
 npm run test:e2e          # Playwright + Chromium (see tests/README.md)
+python3 tests/run_e2e.py --jobs 3   # several test files at once (timing tests still run alone)
 ```
 
 Tests run automatically on every push and pull request (`.github/workflows/ci.yml`).
 After adding, removing or renaming a file run `npm run precache` (the offline file list in `precache.json`; a unit test fails when it is out of date) and bump `CACHE` in `sw.js` when a release changes files.
 
 ### File compatibility
+
+Identifiers written by NoteFlow are `NoteFlow-workspace`, `NoteFlow-notebook`, `NoteFlow-board`, `NoteFlow-pdf-annotations` (extensions `.nfws`, `.nfnote`, `.nfboard`; embedded `noteflow_source.pdf` / `noteflow_annotations.json`). The old `DualNote-…` identifiers and `.dn…` extensions are still **read** everywhere (`LEGACY_*` in `js/model.js`, `js/workspace.js`, `js/pdfio.js`); the old IndexedDB database `dualnote` is copied into `noteflow` on first start. Pen strokes may carry a pressure value as a third number per point; older versions ignore it. Bookmarks are stored in the workspace `settings.bookmarks` (by PDF hash).
 
 Notebook pages gained optional fields (`spacing`, `margin`, `margin_x`, `dir`, `cue`, `summary`, `week_start`) and text items gained optional `runs`, `lists`, `rp`, `fl`, `cont`, `ns`. They are only written when used; older files open unchanged, and older versions of the app ignore fields they do not know (new paper types show as blank paper there).

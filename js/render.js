@@ -177,6 +177,16 @@ export function preloadImages(items) {
 }
 
 // -------------------------------------------------------------------- paths
+/** A pen stroke whose width follows the pressure: smooth curve segments, each as thick as the pressure at its point (opaque strokes only: overlapping round ends would show in a see-through one). */
+function pressureStroke(ctx, pts, w) {
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  const n = pts.length; let prev = pts[0];
+  for (let i = 1; i < n; i++) {
+    const end = i < n - 1 ? [(pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2] : pts[i];
+    ctx.lineWidth = M.pressureWidth(w, pts[i][2]); ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.quadraticCurveTo(pts[i][0], pts[i][1], end[0], end[1]); ctx.stroke();
+    prev = end;
+  }
+}
 function strokePath(ctx, pts) {
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
@@ -684,7 +694,7 @@ export function drawItem(ctx, d, opts = {}) {
   if (t === "pen" || t === "mark") {
     ctx.strokeStyle = M.cssColor(d); ctx.lineWidth = d.w;
     ctx.lineCap = t === "mark" ? "square" : "round";
-    strokePath(ctx, d.pts); ctx.stroke();
+    if (M.hasPressure(d) && M.itemAlpha(d) >= 255) pressureStroke(ctx, d.pts, d.w); else { strokePath(ctx, d.pts); ctx.stroke(); }
   } else if (t === "line" || t === "arrow") {
     ctx.strokeStyle = M.cssColor(d); ctx.lineWidth = d.w;
     linePath(ctx, d, t === "arrow"); ctx.stroke();

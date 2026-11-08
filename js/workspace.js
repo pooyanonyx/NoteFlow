@@ -1,12 +1,13 @@
-// NoteFlow workspace file (.dnws): the whole session in ONE file - a ZIP archive with the same layout
+// NoteFlow workspace file (.nfws; older .dnws files open too): the whole session in ONE file - a ZIP archive with the same layout
 // as the Windows app writes, so workspaces open in both apps:
 //   manifest.json, settings.json, notebook.json, [notebook2.json], [board.json, board2.json],
 //   pdf/original.pdf + pdf/annotations.json, [pdf2/...], [links.json] (linked notes, see links.js; older files and apps do not have it)
 import * as M from "./model.js";
 
-export const WORKSPACE_FORMAT = "DualNote-workspace";
+export const WORKSPACE_FORMAT = "NoteFlow-workspace";
 export const WORKSPACE_VERSION = 1;
-export const EXT = ".dnws";
+export const EXT = ".nfws";
+export const LEGACY_EXT = ".dnws";          // workspaces saved before the rename: still opened (and re-saved in the new format)
 
 export async function sha256Hex(bytes) {
   const d = await crypto.subtle.digest("SHA-256", bytes);
@@ -61,7 +62,7 @@ export async function readWorkspace(data) {
     if (e.message.startsWith("The workspace")) throw e;
     throw new Error("The workspace manifest is unreadable.");
   }
-  if (!manifest || manifest.format !== WORKSPACE_FORMAT) throw new Error("This is not a NoteFlow workspace file.");
+  if (!manifest || !M.formatIs(manifest.format, WORKSPACE_FORMAT, M.LEGACY_FORMAT.workspace)) throw new Error("This is not a NoteFlow workspace file.");
   if (!Number.isInteger(manifest.version) || manifest.version < 1) throw new Error("The workspace has an invalid version number.");
   if (manifest.version > WORKSPACE_VERSION) {
     throw new Error(`This workspace was saved by a newer version of NoteFlow (file version ${manifest.version}, this app reads up to ${WORKSPACE_VERSION}). Please update NoteFlow.`);

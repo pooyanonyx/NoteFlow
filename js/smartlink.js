@@ -9,7 +9,8 @@
 // never in several at once; the amount of text read is capped; it works in small slices; a slow scan makes the next ones wait longer.
 import * as M from "./model.js";
 import { pageTextData, rectsForRange } from "./pdftext.js";
-import { RARITY_MIN_PASSAGES, passagesOf, noteUnits, findMatches, matchRanges } from "./similar.js";
+import { RARITY_MIN_PASSAGES, noteUnits, matchRanges } from "./similar.js";
+import { matchTexts, stopMatcher } from "./matcher.js";
 import { normalize } from "./textnorm.js";
 import { el, icon, toast } from "./ui.js";
 
@@ -40,7 +41,7 @@ export class SmartLink {
     this.scanning = false; this.seenSig = null; this.scannedSig = null; this.coolUntil = 0; this.timer = 0;
     this.ttl = SUGGESTION_TTL_MS; this.clock = 0; this.lastTick = 0;      // how long a shown suggestion waits for an answer (ms), and the one clock that counts it down
     this.stats = { scans: 0, read: [], lastMs: 0 };                    // (what the last scan looked at: the tests check it is only the active pages)
-    this.card = el("aside", { class: "smartcard", hidden: true, "aria-label": "Suggested links" });
+    this.card = el("aside", { class: "smartcard", hidden: true, "aria-label": "Suggested links", "aria-live": "polite" });
     app.root.append(this.card);
   }
   get store() { return this.app.links.store; }
@@ -49,7 +50,7 @@ export class SmartLink {
   setMode(mode, { silent = false } = {}) {
     if (!MODES.some(([m]) => m === mode)) mode = "off";
     this.mode = mode; clearInterval(this.timer); this.timer = 0; this.scannedSig = this.seenSig = null;          // (turning it on looks at the pages that are on screen now)
-    if (mode === "off") { this.suggestions = []; this.report = null; this.stopClock(); this.seenSig = this.scannedSig = null; this.draw(); }
+    if (mode === "off") { this.suggestions = []; this.report = null; this.stopClock(); stopMatcher(); this.seenSig = this.scannedSig = null; this.draw(); }
     else { this.timer = setInterval(() => this.poll(), POLL_MS); if (!silent) toast(mode === "auto" ? "Smart linking is on: clear matches are linked automatically, weaker ones are suggested." : "Smart linking is on: close matches are suggested, you confirm them."); }
     this.app.scheduleAutosave && this.app.scheduleAutosave();
   }
@@ -94,7 +95,6 @@ export class SmartLink {
         try { const data = await pageTextData(p.pdf.doc, p.cur); read.push([k, p.cur]); sf.data = data; sf.text = data.text.slice(0, MAX_PDF_TEXT); }
         catch { sf.issue = "its text could not be read"; }
         if (!sf.issue && sf.text.replace(/\s/g, "").length < 40) sf.issue = "has no selectable text (a scanned page or an image), so it cannot be analyzed";
-        if (!sf.issue) sf.passages = passagesOf(sf.text);
         out.push(sf);
       } else {
         if (!pg) continue;
@@ -132,8 +132,7 @@ export class SmartLink {
         const X = usable[i], Y = usable[j];
         if (X.kind === "pdf" && Y.kind === "pdf") continue;                 // two PDFs have no notes to link
         const [A, B] = X.kind === "pdf" ? [Y, X] : [X, Y];                  // A: the notes, B: what they may be about (a PDF page's passages, or other items)
-        const bUnits = B.kind === "pdf" ? B.passages : B.units;
-        const res = await findMatches(A.units, bUnits, { floor: SUGGEST_AT });
+        const res = await matchTexts(A.units, B.kind === "pdf" ? { text: B.text } : { units: B.units }, SUGGEST_AT);          // (in a worker: a big page never stalls the interface)
         for (const r of res) { const sg = this.makeSuggestion(A, B, r); if (sg) found.push(sg); }
       }
       found.sort((a, b) => b.score - a.score);

@@ -23,11 +23,16 @@ export const PAGE_W = 595.0, PAGE_H = 842.0;             // notebook page = A4 i
 // (text item with ruled: true) is laid out on this same lattice, see render.js.
 export { PAPERS, RULE_TOP, RULE_PITCH, RULE_BOTTOM };
 export const NOTE_W = 190.0, NOTE_H = 140.0, NOTE_HEADER = 16.0;
-// File-format identifiers keep their original "DualNote-..." names on purpose: existing files, annotated PDFs and the Windows app check them.
-export const NOTEBOOK_FORMAT = "DualNote-notebook";
-export const PDF_ANNOT_FORMAT = "DualNote-pdf-annotations";
-export const EMBED_SRC = "dualnote_source.pdf";
-export const EMBED_JSON = "dualnote_annotations.json";
+// File-format identifiers: files are written with the NoteFlow names. Files written before the product was renamed carry the old "DualNote-..." names; they are still
+// read everywhere (LEGACY_*), so no existing notebook, board, workspace or annotated PDF stops opening.
+export const NOTEBOOK_FORMAT = "NoteFlow-notebook";
+export const PDF_ANNOT_FORMAT = "NoteFlow-pdf-annotations";
+export const EMBED_SRC = "noteflow_source.pdf";
+export const EMBED_JSON = "noteflow_annotations.json";
+export const LEGACY_EMBED = [["dualnote_source.pdf", "dualnote_annotations.json"]];
+export const LEGACY_FORMAT = { notebook: "DualNote-notebook", board: "DualNote-board", pdfAnnotations: "DualNote-pdf-annotations", workspace: "DualNote-workspace" };
+/** Does a file's format field name this kind of file (under its current or its legacy name)? */
+export const formatIs = (value, current, legacy) => value === current || value === legacy;
 export const LEGACY_ALPHA = { mark: 110, hl: 100 };
 export const MIN_SIZE = 4.0;
 export const TEXT_DIRS = ["ltr", "rtl"];                    // explicit text direction of a text / note item
@@ -62,7 +67,7 @@ export const isClosedShape = (d) => d.t === "rect" || d.t === "ellipse" || d.t =
 //   node {t:"node", id, kind: round|ellipse|rect, x1,y1,x2,y2, text, color, w, size, fill?, dir?, align?}
 //   conn {t:"conn", from: nodeId, to: nodeId, style: curve|line|elbow, arrow: bool, color, w, label?}
 // A connector stores the ids of its two nodes, not coordinates: its path follows the nodes when they move.
-export const BOARD_FORMAT = "DualNote-board", BOARD_W = 4000.0, BOARD_H = 3000.0;
+export const BOARD_FORMAT = "NoteFlow-board", BOARD_W = 4000.0, BOARD_H = 3000.0;
 export const BOARD_BGS = ["white", "black"];                  // page.paper of a board; page.grid = dotted grid on/off
 export const NODE_KINDS = ["round", "ellipse", "rect"], CONN_STYLES = ["curve", "line", "elbow"];
 export const NODE_PAD = 10, NODE_MIN_W = 90, NODE_MIN_H = 44, NODE_MAX_W = 260, NODE_GAP_X = 90, NODE_GAP_Y = 24;
@@ -129,7 +134,7 @@ export function boardToJson(page) {
 export function parseBoard(text) {
   let data;
   try { data = JSON.parse(text); } catch { throw new Error("Not a valid NoteFlow board file."); }
-  if (!data || typeof data !== "object" || data.format !== BOARD_FORMAT) throw new Error("Not a NoteFlow board file.");
+  if (!data || typeof data !== "object" || !formatIs(data.format, BOARD_FORMAT, LEGACY_FORMAT.board)) throw new Error("Not a NoteFlow board file.");
   const items = pruneOrphans((Array.isArray(data.items) ? data.items : []).map(sanitizeItem).filter(Boolean));
   return { paper: BOARD_BGS.includes(data.background) ? data.background : "white", grid: !!data.grid, items };
 }
@@ -258,7 +263,7 @@ export function sanitizeItem(d) {
     const t = d.t;
     if (t === "pen" || t === "mark") {
       if (!Array.isArray(d.pts)) return null;
-      const pts = d.pts.map((p) => [num(p[0]), num(p[1])]);
+      const pts = d.pts.map((p) => (Number.isFinite(+p[2]) && t === "pen" ? [num(p[0]), num(p[1]), Math.round(Math.min(1, Math.max(0.01, +p[2])) * 100) / 100] : [num(p[0]), num(p[1])]));   // (a point may carry the pen pressure as a third value)
       if (!pts.length) return null;
       return addExtras(d, { t, pts, color: color(d.color), w: Math.max(0.1, num(d.w)) });
     }
@@ -324,7 +329,7 @@ export function hitTest(d, x, y, tol, nodes = null) {
     return !!d.label && Math.abs(x - g.mid[0]) <= 4 * d.label.length + 10 && Math.abs(y - g.mid[1]) <= 12;
   }
   if (t === "pen" || t === "mark") {
-    const r = d.w / 2 + tol, pts = d.pts;
+    const r = penHalf(d) + tol, pts = d.pts;
     if (pts.length === 1) return Math.hypot(x - pts[0][0], y - pts[0][1]) <= r;
     for (let i = 0; i + 1 < pts.length; i++) {
       if (distPointSegment(x, y, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) <= r) return true;
@@ -403,8 +408,13 @@ const polyLen = (pts) => { let s = 0; for (let i = 0; i + 1 < pts.length; i++) s
  * The stroke is a line of thickness d.w with round ends, so the cut is made at r + w/2 from the eraser: the visible stroke then
  * ends exactly at the eraser's edge.
  */
+/** Pressure of a stroke: the thickness at pressure p is w * (0.3 + 1.4 p), so the middle of the range (p = 0.5, what a mouse reports) is the nominal width. */
+export const pressureWidth = (w, p) => w * (0.3 + 1.4 * (p === undefined ? 0.5 : p));
+export const hasPressure = (d) => d.t === "pen" && d.pts.length > 1 && d.pts.every((q) => q.length > 2);
+/** Half the thickest part of a pen or marker stroke (for hit-testing and erasing). */
+export const penHalf = (d) => (hasPressure(d) ? pressureWidth(d.w, Math.max(...d.pts.map((q) => q[2]))) / 2 : d.w / 2);
 export function erasePen(d, a, b, r) {
-  const rr = r + d.w / 2, pts = d.pts, n = pts.length, r2 = (v) => Math.round(v * 100) / 100;
+  const rr = r + penHalf(d), pts = d.pts, n = pts.length, r2 = (v) => Math.round(v * 100) / 100;
   if (!n) return null;
   if (n === 1) return distPointSegment(pts[0][0], pts[0][1], a[0], a[1], b[0], b[1]) <= rr ? [] : null;
   const pieces = []; let cur = null, touched = false;
@@ -412,7 +422,7 @@ export function erasePen(d, a, b, r) {
     const P = pts[i], Q = pts[i + 1], iv = segCapsuleInterval(P, Q, a, b, rr);
     if (!iv) { if (!cur) cur = [P]; cur.push(Q); continue; }
     touched = true;
-    const [t0, t1] = iv, at = (t) => [r2(P[0] + (Q[0] - P[0]) * t), r2(P[1] + (Q[1] - P[1]) * t)];
+    const [t0, t1] = iv, at = (t) => (P.length > 2 && Q.length > 2 ? [r2(P[0] + (Q[0] - P[0]) * t), r2(P[1] + (Q[1] - P[1]) * t), r2(P[2] + (Q[2] - P[2]) * t)] : [r2(P[0] + (Q[0] - P[0]) * t), r2(P[1] + (Q[1] - P[1]) * t)]);
     if (t0 > 1e-6) { if (!cur) cur = [P]; cur.push(at(t0)); }             // the part before the eraser
     if (cur) { pieces.push(cur); cur = null; }
     if (t1 < 1 - 1e-6) cur = [at(t1), Q];                                  // the part after the eraser continues the stroke
@@ -430,7 +440,7 @@ export function shapePoints(d) {
 export function translate(d, dx, dy) {
   const n = { ...d }, t = d.t;
   if (t === "conn") return n;                                // follows its nodes
-  if (t === "pen" || t === "mark") n.pts = d.pts.map(([x, y]) => [round2(x + dx), round2(y + dy)]);
+  if (t === "pen" || t === "mark") n.pts = d.pts.map((q) => [round2(q[0] + dx), round2(q[1] + dy), ...q.slice(2)]);
   else if (t === "text" || t === "note") { n.x = round2(d.x + dx); n.y = round2(d.y + dy); }
   else { n.x1 = round2(d.x1 + dx); n.y1 = round2(d.y1 + dy); n.x2 = round2(d.x2 + dx); n.y2 = round2(d.y2 + dy); }
   return n;
@@ -498,9 +508,9 @@ export function resizeItem(d, handle, px, py, textBox = null, e = 0, keepAspect 
     n.x = round2(x0); n.y = round2(y0); n.w = round2(Math.max(60, x1 - x0)); n.h = round2(Math.max(40, y1 - y0));
   } else if (t === "pen" || t === "mark") {
     const sx = ow > 1e-6 ? (x1 - x0) / ow : 1, sy = oh > 1e-6 ? (y1 - y0) / oh : 1;
-    n.pts = d.pts.map(([x, y]) => [
+    n.pts = d.pts.map(([x, y, ...rest]) => [
       round2(ow > 1e-6 ? x0 + (x - ox0) * sx : x + (x0 - ox0)),
-      round2(oh > 1e-6 ? y0 + (y - oy0) * sy : y + (y0 - oy0))]);
+      round2(oh > 1e-6 ? y0 + (y - oy0) * sy : y + (y0 - oy0)), ...rest]);
   } else if (t === "text") {
     const s = scale ?? 1.0;
     n.size = Math.round(Math.min(400, Math.max(4, d.size * s)) * 10) / 10;
@@ -544,7 +554,7 @@ export function notebookToJson(pages) {
 export function parseNotebook(text) {
   let data;
   try { data = JSON.parse(text); } catch { throw new Error("Not a valid NoteFlow notebook file."); }
-  if (!data || typeof data !== "object" || data.format !== NOTEBOOK_FORMAT) throw new Error("Not a NoteFlow notebook file.");
+  if (!data || typeof data !== "object" || !formatIs(data.format, NOTEBOOK_FORMAT, LEGACY_FORMAT.notebook)) throw new Error("Not a NoteFlow notebook file.");
   if (!Array.isArray(data.pages) || !data.pages.length) throw new Error("The notebook has no pages.");
   return data.pages.map((p) => {
     if (!p || typeof p !== "object") throw new Error("Corrupt page data.");
@@ -560,7 +570,7 @@ export function parsePdfAnnotations(raw, pageCount) {
   let data;
   try { data = JSON.parse(typeof raw === "string" ? raw : new TextDecoder("utf-8", { fatal: true }).decode(raw)); }
   catch { return null; }
-  if (!data || data.format !== PDF_ANNOT_FORMAT || !Array.isArray(data.pages) || data.pages.length !== pageCount) return null;
+  if (!data || !formatIs(data.format, PDF_ANNOT_FORMAT, LEGACY_FORMAT.pdfAnnotations) || !Array.isArray(data.pages) || data.pages.length !== pageCount) return null;
   const out = [];
   for (const p of data.pages) {
     if (!Array.isArray(p)) return null;

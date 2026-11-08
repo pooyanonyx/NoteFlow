@@ -2,6 +2,7 @@
 // Annotated PDFs embed the original PDF + the editable annotations (same attachment names as the
 // Windows app), so a PDF saved here reopens editable in both apps.
 import * as M from "./model.js";
+import * as NATIVE from "./pdfnative.js";
 import { renderPage, preloadImages, renderBoardRegion, contentBounds, boardTheme } from "./render.js";
 
 let pdfjs = null;
@@ -36,7 +37,8 @@ export async function loadDocument(bytes, { detectEmbedded = true } = {}) {
   if (detectEmbedded) {
     try {
       const att = await doc.getAttachments();
-      const a = att && att[M.EMBED_SRC], j = att && att[M.EMBED_JSON];
+      let a = att && att[M.EMBED_SRC], j = att && att[M.EMBED_JSON];
+      if (!(a && j)) for (const [s, js] of M.LEGACY_EMBED) if (att && att[s] && att[js]) { a = att[s]; j = att[js]; break; }        // (annotated PDFs saved before the rename)
       if (a && j) {
         const src2 = new Uint8Array(a.content);
         const doc2 = await openRaw(src2);
@@ -110,7 +112,18 @@ function pickScale(w, h, want = 3) {
   return s;
 }
 
-/** Write a copy of the PDF with the annotations drawn on top (as images) plus the embedded editable data. */
+/** Add one real PDF annotation (Ink or Highlight, with an appearance stream) to a page. */
+function addNativeAnnotation(out, pg, spec) {
+  const { PDFName, PDFString } = globalThis.PDFLib, ctx = out.context;
+  const gs = spec.kind === "Highlight" ? { Type: "ExtGState", BM: "Multiply", CA: spec.alpha, ca: spec.alpha } : { Type: "ExtGState", CA: spec.alpha, ca: spec.alpha };
+  const ap = ctx.register(ctx.stream(NATIVE.appearanceStream(spec), { Type: "XObject", Subtype: "Form", BBox: spec.rect, Resources: ctx.obj({ ExtGState: { GS: ctx.obj(gs) } }) }));
+  const dict = { Type: "Annot", Subtype: spec.kind, Rect: spec.rect, C: spec.color, CA: spec.alpha, F: 4, T: PDFString.of("NoteFlow"), Contents: PDFString.of(""), AP: { N: ap } };
+  if (spec.kind === "Highlight") dict.QuadPoints = spec.quad; else { dict.InkList = [spec.ink]; dict.BS = { W: spec.width }; }
+  pg.node.addAnnot(ctx.register(ctx.obj(dict)));
+}
+
+/** Write a copy of the PDF: pen / marker strokes and text highlights as real PDF annotations (on pages that are not rotated), everything else drawn on top as an image,
+ *  plus the embedded editable data. */
 export async function exportAnnotatedPdf(source, pagesItems, onProgress = () => {}) {
   const { PDFDocument, degrees } = globalThis.PDFLib;
   const out = await PDFDocument.load(source, { updateMetadata: false });
@@ -119,8 +132,10 @@ export async function exportAnnotatedPdf(source, pagesItems, onProgress = () => 
   const todo = pagesItems.map((it, i) => (it.length ? i : -1)).filter((i) => i >= 0);
   let done = 0;
   for (const i of todo) {
-    const items = pagesItems[i];
     const pg = pages[i], rot = ((pg.getRotation().angle % 360) + 360) % 360, box = pg.getCropBox();
+    const { native, raster: items } = NATIVE.splitNative(pagesItems[i], { rotated: rot !== 0 });
+    for (const d of native) addNativeAnnotation(out, pg, NATIVE.annotationSpec(d, box));
+    if (!items.length) { onProgress(++done / todo.length); continue; }                  // (everything on this page is a real annotation: no picture needed)
     const cw = box.width, ch = box.height, dw = rot % 180 ? ch : cw, dh = rot % 180 ? cw : ch;   // displayed size
     await preloadImages(items);
     const canvas = document.createElement("canvas");
