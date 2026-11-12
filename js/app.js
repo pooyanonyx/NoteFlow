@@ -26,6 +26,7 @@ const LAYOUTS = [["PDF Only", ["pdf"]], ["Notebook Only", ["nb"]], ["Board Only"
 
 // ------------------------------------------------------------- IndexedDB
 const DB_NAME = "noteflow", LEGACY_DB_NAME = "dualnote";
+const AUTOSAVE_QUIET_MS = 1200, AUTOSAVE_MAX_WAIT_MS = 8000;       // Auto-Save: a backup this long after the last change, and at the latest this long after the first unsaved one
 /** The session database. Sessions saved before the product was renamed live in the "dualnote" database: on the first start under the new name they are copied over (and only then
  *  is the old database removed), so an existing user loses nothing. If the copy fails the old database is left alone and keeps being used as a read-only fallback for the restore. */
 const openDb = (name) => new Promise((res, rej) => {
@@ -65,11 +66,14 @@ const idb = {
   },
   async tx(mode, fn) {
     const db = await this.open();
-    return new Promise((res, rej) => { const t = db.transaction("kv", mode), s = t.objectStore("kv"); const r = fn(s); t.oncomplete = () => res(r && r.result); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
+    return new Promise((res, rej) => { const t = db.transaction("kv", mode), s = t.objectStore("kv"); let r; try { r = fn(s); } catch (e) { try { t.abort(); } catch { /* already finished */ } rej(e); return; }      /* (an error while queueing a write, e.g. a value that cannot be stored, must undo the whole transaction: otherwise the writes before it would be committed) */
+      t.oncomplete = () => res(r && r.result); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
   },
   get(k) { return this.tx("readonly", (s) => s.get(k)); },
   set(k, v) { return this.tx("readwrite", (s) => s.put(v, k)); },
   del(k) { return this.tx("readwrite", (s) => s.delete(k)); },
+  /** Many writes and deletes in ONE transaction: they all happen or none does (an interrupted or failing save leaves the previous state exactly as it was). */
+  batch(puts, dels = []) { return this.tx("readwrite", (s) => { for (const [k, v] of puts) s.put(v, k); for (const k of dels) s.delete(k); return null; }); },
   keys() { return this.tx("readonly", (s) => s.getAllKeys()); },
 };
 
@@ -83,8 +87,8 @@ export class App {
       board: new Panel(this, "board", "board", "Board"), board2: new Panel(this, "board2", "board", "Board 2") };
     this._partIds = new WeakMap(); this._written = new Set();
     this.autosaveOk = true; this.restoring = false; this.autosaveTimer = 0; this.wsName = null; this.installEvt = null;
-    this.fileHandle = null; this.fileSaving = false; this.fileSavedAt = 0; this.fileError = null; this.fileTimer = 0;       // the workspace file this work is saved into (when the browser allows it)
-    this.autosavePaused = false; this.autosaveError = null; this.fileSaveDelay = 30000;
+    this.changeSeq = 0; this.savedSeq = 0; this.savedAt = 0; this.backing = false; this.backupAgain = false; this.firstChangeAt = 0; this.exporting = false;      // (backup bookkeeping: any change bumps changeSeq; a successful backup of the state at that moment sets savedSeq)
+    this.autosavePaused = false; this.autosaveError = null;
     setImageLoadedCallback(() => { for (const p of Object.values(this.panels)) p.render(); });
     // the bundled Persian font is used by the canvas too: redraw once it has loaded
     document.fonts?.addEventListener?.("loadingdone", () => { bumpFontEpoch(); for (const p of Object.values(this.panels)) p.render(); });         // text is measured again with the real font
@@ -99,7 +103,7 @@ export class App {
     this.links.store.onChange(upd); upd();
     this.refreshLayout();
     window.addEventListener("resize", () => this.refreshLayout());
-    window.addEventListener("beforeunload", (e) => { this.flushAutosave(); if (this.anyDirty() && !this.autosaveOk) { e.preventDefault(); e.returnValue = ""; } });
+    window.addEventListener("beforeunload", (e) => { this.flushAutosave(); if (this.changeSeq !== this.savedSeq && (!prefs.get("autoSave") || !this.autosaveOk)) { e.preventDefault(); e.returnValue = ""; } });       // (a warning only when changes would really be lost)
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") this.flushAutosave(); });
     window.addEventListener("pagehide", () => this.flushAutosave());
     initTouchTips();                                      // press-and-hold bubbles for touch / pen (desktop keeps the browser tooltip)
@@ -116,7 +120,7 @@ export class App {
     DX.install((entry) => this.onUnexpectedError(entry));
     this.applyAppearance();
     this.applyMemoryMode();
-    prefs.onChange((k) => { if (k === "memorySaver") this.applyMemoryMode(); if (k === "theme" || k === "motion") this.applyAppearance(); if (k === "autoSaveFile") this.scheduleFileSave(); });
+    prefs.onChange((k) => { if (k === "memorySaver") this.applyMemoryMode(); if (k === "theme" || k === "motion") this.applyAppearance(); if (k === "autoSave") this.onAutoSaveChanged(); });
     try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (prefs.get("theme") === "system") this.applyAppearance(); }); } catch { /* old browser */ }
     this.refreshSaveStatus();
     this.setActive(this.panels.pdf);
@@ -133,9 +137,10 @@ export class App {
     this.installBtn.hidden = true;
     this.top = el("header", { class: "topbar" },
       el("span", { class: "brand" }, "NoteFlow"),
-      b("open", "Open workspace", "Open a workspace file (.nfws; older .dnws files open too)", () => this.openWorkspaceDialog()),
-      b("save", "Save workspace", "Save everything (PDF, annotations, notebooks) in one file (" + K.MOD + "+S). Ctrl+Alt+S: save under a new name.", () => this.saveWorkspace()),
-      this.saveStat = el("button", { class: "savestat", type: "button", "data-state": "none", hidden: true, onclick: () => this.onSaveStatusClick() }),
+      b("open", "Open workspace", "Open a workspace file (.nfws; older .dnws files open too)", () => this.wsOpenInput.click()),
+      b("save", "Save", "Save everything on this device now (" + K.MOD + "+S). NoteFlow also saves automatically (Settings: Auto-Save Workspace), and brings your work back when you reopen it.", () => this.saveNow()),
+      this.saveStat = el("button", { class: "savestat", type: "button", "data-state": "saved", onclick: () => this.saveNow() }),
+      b("export", "Export", "Export a copy of the workspace as a file on your computer (" + K.MOD + "+Shift+E)", () => this.exportWorkspace()),
       b("plus", "New", "Start a new empty workspace", () => this.newWorkspace()),
       b("search", "Search", "Search everywhere: notebooks, PDFs, boards (" + K.MOD + "+Shift+F)", () => this.search.toggle()),
       b("snip", "Snip", "Snipping tool: capture an area of a PDF page, a notebook page or the board, then copy it or insert it into another panel (" + K.MOD + "+Shift+S)", () => this.snip.toggle()),
@@ -328,11 +333,9 @@ export class App {
   async onDrop(e) {
     e.preventDefault();
     const at = this.panelAt(e.clientX, e.clientY);
-    const handles = new Map();                                                // (Chromium: a dropped file can come with a handle, so Save writes back into it)
-    try { for (const it of e.dataTransfer?.items || []) if (it.kind === "file" && it.getAsFileSystemHandle) { const h = await it.getAsFileSystemHandle(); if (h && h.kind === "file") handles.set(h.name, h); } } catch { /* ignore */ }
     for (const f of e.dataTransfer?.files || []) {
       const n = f.name.toLowerCase();
-      if (n.endsWith(".nfws") || n.endsWith(".dnws")) await this.openWorkspaceFile(f, handles.get(f.name) || null);
+      if (n.endsWith(".nfws") || n.endsWith(".dnws")) await this.openWorkspaceFile(f);
       else if (n.endsWith(".pdf") || f.type === "application/pdf") {
         const p = at && at.kind === "pdf" && this.order.includes(at.key) ? at : await this.ensurePanelOfKind("pdf");
         if (p && await this.confirmReplace(p, "open another PDF")) await p.openPdfBytes(new Uint8Array(await f.arrayBuffer()), f.name);
@@ -364,8 +367,8 @@ export class App {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;       // already handled / IME composition in progress
     const t = e.target, p = this.active, mod = e.ctrlKey || e.metaKey, key = K.keyName(e);
     if (document.querySelector(".backdrop")) return;                            // a dialog is open: it owns the keyboard (it handles its own Escape)
-    if (mod && !e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveWorkspace(); return; }
-    if (mod && e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveWorkspace({ as: true }); return; }
+    if (mod && !e.altKey && !e.shiftKey && key === "s") { e.preventDefault(); this.saveNow(); return; }                       // Ctrl+S: a backup on this device, never a download
+    if (mod && ((e.shiftKey && !e.altKey && key === "e") || (e.altKey && !e.shiftKey && key === "s"))) { e.preventDefault(); this.exportWorkspace(); return; }     // export a file
     if (mod && !e.altKey && e.shiftKey && key === "f") { e.preventDefault(); this.search.toggle(); return; }
     if (mod && !e.altKey && e.shiftKey && key === "s") { e.preventDefault(); this.snip.toggle(); return; }
     if (K.isTextField(t)) return;                                               // typing: Space, letters, Ctrl+Z (text undo) ... are the browser's
@@ -411,7 +414,7 @@ export class App {
       el("p", {}, el("b", {}, "Touch: "), "press and hold a toolbar button for a moment to read what it does (a short tap works as usual)."),
       el("p", {}, el("b", {}, "Keyboard: "), "V select, H hand (or hold Space), P pen, E eraser, T text ..., Ctrl+Z / Ctrl+Shift+Z undo / redo. Press ? for the full list."),
       el("p", {}, el("b", {}, "Pictures: "), "Press Ctrl+V (or the Paste button) to paste a screenshot, or use the Image button / drag a picture onto a page."),
-      el("p", {}, el("b", {}, "Saving: "), "Save workspace keeps the PDF, all annotations and both notebooks in ONE file (also opens in the Windows app). Your session is also kept automatically on this device."),
+      el("p", {}, el("b", {}, "Saving: "), "Your work is saved on this device automatically (Settings: Auto-Save Workspace) and is back when you reopen NoteFlow; Ctrl+S saves right now. The Saved / Unsaved mark next to Save tells you where you are. Export makes a file on your computer with the PDF, all annotations, notebooks and boards in ONE workspace file, to keep or move it."),
       el("p", { class: "muted" }, "Annotated PDFs show your drawings as images on the page and embed the original + editable data, so they reopen editable here and in the Windows app.")) });
     if (r === "keys") this.shortcuts();
   }
@@ -459,37 +462,28 @@ export class App {
       board2: this.order.includes("board2") || (all && !this.isPristine(P.board2)) ? P.board2.boardData() : null,
       settings: this.settings(), type: M.workspaceTypeOf(this.order) || "custom", links: this.links.store.toJSON() };
   }
-  /** Save the workspace. In a browser that can write into a chosen file (File System Access API) the first save asks where, every later save overwrites that same file;
-   *  elsewhere it downloads a copy, as before. { as: true } always asks for a new name; { silent: true } is the automatic save (no progress box, no notice, never asks). */
-  async saveWorkspace({ as = false, silent = false } = {}) {
-    if (this.fileSaving) return false;
-    if (silent && (!this.fileHandle || Object.values(this.panels).some((p) => p.editing))) return false;
-    this.fileSaving = true; this.refreshSaveStatus();
-    const busy = silent ? null : this.busy("Saving workspace…");
+  /** EXPORT: a portable copy of the whole workspace as a file on the computer (a separate act from the automatic backup: the backup lives in this browser and is what reopening restores;
+   *  the file is for moving the work elsewhere or keeping an archive). Chromium browsers ask where to put it; elsewhere it is downloaded. */
+  async exportWorkspace() {
+    if (this.exporting) return false;
+    this.exporting = true;
+    const busy = this.busy("Exporting workspace…");
     try {
       const blob = await WS.writeWorkspace(this.collect());
       const native = globalThis.Capacitor && globalThis.Capacitor.isNativePlatform && globalThis.Capacitor.isNativePlatform();
+      const name = SF.suggestName(this.wsName);
       if (SF.canSaveInPlace() && !native) {
-        let h = !as ? this.fileHandle : null;
-        if (h && !(await SF.hasWritePermission(h, { ask: !silent }))) { if (silent) return false; h = null; }       // (after a reload the browser asks again; refused: save under a name)
-        if (!h) {
-          if (silent) return false;
-          h = await SF.pickSaveHandle(SF.suggestName(this.wsName));
-          if (!h) return false;                                                                                      // cancelled: nothing changed
-        }
-        await SF.writeToHandle(h, blob);
-        this.fileHandle = h; this.wsName = h.name;
-        if (!silent) toast(`Saved to “${h.name}”`);
-      } else { await this.saveBlob(blob, SF.suggestName(this.wsName)); this.wsName = SF.suggestName(this.wsName); }
-      for (const [k, p] of Object.entries(this.panels)) { if (this.order.includes(k)) p.dirty = false; p.ui(); }    // panels outside the workspace were not saved
-      this.fileSavedAt = Date.now(); this.fileError = null;
+        const h = await SF.pickSaveHandle(name);
+        if (!h) return false;                                                               // cancelled: nothing changed
+        await SF.writeToHandle(h, blob); this.wsName = h.name; toast(`Exported to “${h.name}”`);
+      } else { await this.saveBlob(blob, name); this.wsName = name; }
+      for (const [k, p] of Object.entries(this.panels)) { if (this.order.includes(k)) p.dirty = false; p.ui(); }       // (panels outside the workspace were not exported)
       return true;
     } catch (e) {
-      console.error(e); DX.record("save", e);
-      this.fileError = e.message || String(e);
-      if (!silent) toast("Could not save the workspace: " + this.fileError + " Your work is still kept on this device.", 6000);
+      console.error(e); DX.record("export", e);
+      toast("Could not export the workspace: " + (e.message || e) + " Your work is still backed up on this device.", 6000);
       return false;
-    } finally { this.fileSaving = false; if (busy) busy.done(); this.refreshSaveStatus(); }
+    } finally { this.exporting = false; busy.done(); }
   }
   /** Colour theme (system / light / dark) and reduced motion, from the preferences. */
   applyAppearance() {
@@ -498,68 +492,58 @@ export class App {
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#0d1014" : "#1f2937");
     for (const p of Object.values(this.panels)) { p.desk = null; p.caretColor = null; p.render(); }
   }
+  /** Auto-Save was switched on (a backup of whatever is unsaved follows at once) or off (nothing is saved by itself any more; Ctrl+S still saves). */
+  onAutoSaveChanged() {
+    clearTimeout(this.autosaveTimer); this.autosaveTimer = 0; this.firstChangeAt = 0;
+    if (prefs.get("autoSave") && this.changeSeq !== this.savedSeq && !this.autosavePaused) this.autosaveTimer = setTimeout(() => this.autosave(), 200);
+    this.refreshSaveStatus();
+  }
   openSettings() { return openSettings(this); }
   async clearBackup() {
     const keys = await idb.keys?.() || [];
-    for (const k of keys) if (k === "session" || /^(pg|pdf|ptxt):/.test(String(k))) await idb.del(k);
+    for (const k of keys) if (k === "session" || k === "session-prev" || /^(pg|pdf|ptxt):/.test(String(k))) await idb.del(k);
+    this.savedSeq = this.changeSeq - 1; this.refreshSaveStatus();
     this._written.clear(); this._partIds = new WeakMap();
   }
   applyMemoryMode() {
     setMemorySaver(prefs.get("memorySaver"));
     for (const p of Object.values(this.panels)) { p.onResize(); p.render(); p.scheduleRaster?.(); }
   }
-  /** What the save indicator says: whether the work is in a file, and whether it is at least backed up on this device. */
+  /** The save indicator describes the BACKUP on this device (not files): Saved = the latest state is backed up; Unsaved = changes not backed up yet; Backup failed. */
   saveStatus() {
-    const dirty = this.anyDirty(), file = this.fileHandle ? this.wsName : null;
-    const backup = this.autosavePaused ? "Not backed up on this device (the last session could not be restored)" : !this.autosaveOk ? "NOT backed up on this device: " + (this.autosaveError || "the browser refused to store it") : "backed up on this device";
-    const warn = this.autosavePaused || !this.autosaveOk;
-    if (this.fileSaving) return { state: "saving", label: "Saving…", tip: "Saving the workspace…" };
-    if (this.fileError && dirty) return { state: "error", label: "Not saved", tip: `The last save failed (${this.fileError}). Click to try again; ${backup}.` };
-    if (warn && dirty) return { state: "error", label: "Not backed up", tip: `${backup}. Save the workspace to a file now (click here).` };
-    if (dirty) return { state: "dirty", label: file ? "Unsaved changes" : "Not saved to a file", tip: `${file ? "Changes since the last save of “" + file + "”" : "This work is not in a file yet"}; ${backup}. Click to save (${K.MOD}+S).` };
-    if (file && this.fileSavedAt) return { state: "saved", label: "Saved", tip: `Saved in “${file}” at ${new Date(this.fileSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` };
-    return { state: "none", label: "", tip: "" };
+    const unsaved = this.changeSeq !== this.savedSeq, at = this.savedAt ? new Date(this.savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    if (this.backing) return { state: "saving", label: "Saving…", tip: "Saving a backup on this device…" };
+    if (this.autosavePaused) return { state: "error", label: "Backup paused", tip: "The previous backup could not be read and is being kept, so nothing new is backed up until you decide (reload the page to choose)." };
+    if (!this.autosaveOk) return { state: "error", label: "Backup failed", tip: `The backup on this device failed: ${this.autosaveError || "the browser refused to store it"}. Click to try again. Export the workspace to keep a copy.` };
+    if (unsaved) return { state: "dirty", label: "Unsaved", tip: prefs.get("autoSave") ? "Changes are being saved to this device. (Ctrl+S saves right now.)" : "Auto-Save is off: press Ctrl+S to save these changes on this device." };
+    return { state: "saved", label: "Saved", tip: `Everything is backed up on this device${at ? " (" + at + ")" : ""}. It comes back when you reopen NoteFlow. Use Export for a file.` };
   }
   refreshSaveStatus() {
     const st = this.saveStatus(), b = this.saveStat; if (!b) return;
-    b.hidden = !st.label; b.dataset.state = st.state; b.textContent = st.label; b.title = st.tip; b.setAttribute("aria-label", "Save status: " + st.tip);
+    b.hidden = false; b.dataset.state = st.state; b.textContent = st.label; b.title = st.tip; b.setAttribute("aria-label", "Save status: " + st.label + ". " + st.tip);
   }
-  onSaveStatusClick() { this.saveWorkspace(); }
-  /** After a pause, also write the changes into the workspace file (opt-in: it rewrites the whole file, PDF included). Only into a file the user already chose and allowed. */
-  scheduleFileSave() {
-    clearTimeout(this.fileTimer);
-    if (!prefs.get("autoSaveFile") || !this.fileHandle) return;
-    this.fileTimer = setTimeout(async () => { if (this.anyDirty()) await this.saveWorkspace({ silent: true }); }, this.fileSaveDelay);
-  }
+  onSaveStatusClick() { this.saveNow(); }
   onUnexpectedError(entry) {
     const safe = this.autosaveOk && !this.autosavePaused;
     toast(safe ? "Something went wrong. Your work is backed up on this device; if it keeps happening, save the workspace and reload." : "Something went wrong, and your work is NOT backed up. Save the workspace to a file now.", 7000);
     try { this.flushAutosave(); } catch { /* ignore */ }
   }
-  async openWorkspaceDialog() {
-    if (SF.canPickToOpen()) {
-      try {
-        const r = await SF.pickOpenHandle(); if (!r) return;
-        await this.openWorkspaceFile(r.file, r.handle);
-      } catch (e) { DX.record("open", e); toast("Could not open the file: " + (e.message || e), 5000); }
-    } else this.wsOpenInput.click();
-  }
   async confirmDiscard() {
     if (!this.anyDirty()) return true;
-    const c = await dialog({ title: "Unsaved changes", content: "Some changes are not saved in a file. (They are kept on this device automatically, but opening something else replaces them.) Save the workspace first?",
-      buttons: [{ label: "Cancel", value: "cancel" }, { label: "Don't save", value: "dont", danger: true }, { label: "Save workspace", value: "save", primary: true }] });
+    const c = await dialog({ title: "Replace the current workspace?", content: "The current workspace is backed up on this device, but this replaces that backup. If you want to keep it, export it as a file first.",
+      buttons: [{ label: "Cancel", value: "cancel" }, { label: "Replace it", value: "dont", danger: true }, { label: "Export first", value: "save", primary: true }] });
     if (!c || c === "cancel") return false;
-    if (c === "save") await this.saveWorkspace();
+    if (c === "save" && !(await this.exportWorkspace())) return false;
     return true;
   }
   async newWorkspace() {
     if (!(await this.confirmDiscard())) return;
     await this.restore({ pdf: null, pdf2: null, notebook: [{ paper: "lined", items: [] }], notebook2: null, settings: {} });
-    this.wsName = null; this.fileHandle = null; this.fileSavedAt = 0; this.fileError = null; this.autosavePaused = false; this.refreshSaveStatus();
-    try { await idb.del("session"); } catch { /* ignore */ }
+    this.wsName = null; this.autosavePaused = false; this.refreshSaveStatus();
+    try { await idb.batch([], ["session", "session-prev"]); } catch { /* ignore */ }
   }
   async onWorkspaceFile() { const f = this.wsOpenInput.files[0]; this.wsOpenInput.value = ""; if (f) await this.openWorkspaceFile(f); }
-  async openWorkspaceFile(file, handle = null) {
+  async openWorkspaceFile(file) {
     if (!(await this.confirmDiscard())) return false;
     const busy = this.busy("Opening workspace…");
     try {
@@ -567,9 +551,8 @@ export class App {
       await this.restore(ws);
       this.wsName = file.name;
       // a workspace of the current kind is saved back into the same file; an older (.dnws) one is never overwritten by a file in the new format (the first save asks for a name)
-      this.fileHandle = handle && SF.isCurrentWorkspaceName(file.name) ? handle : null; this.fileSavedAt = this.fileHandle ? Date.now() : 0; this.fileError = null;
       this.refreshSaveStatus();
-      toast(handle && !this.fileHandle ? "Workspace opened. It was saved by an older version: saving asks for a new file name and leaves the original untouched." : "Workspace opened.", handle && !this.fileHandle ? 5000 : 2600);
+      toast("Workspace opened.");
       return true;
     } catch (e) { toast(e.message || "Could not open this workspace.", 5000); return false; }
     finally { busy.done(); }
@@ -611,88 +594,142 @@ export class App {
   }
 
   // ------------------------------------------------------------- autosave
-  scheduleAutosave() { clearTimeout(this.autosaveTimer); this.autosaveTimer = setTimeout(() => this.autosave(), 2500); this.scheduleFileSave(); this.refreshSaveStatus(); }
+  // ====================================================================== the backup on this device (what reopening restores)
+  // One simple model: ANY change bumps changeSeq; a backup remembers the changeSeq it started with and, when it has been written AND read back, sets savedSeq to it. "Saved" is
+  // changeSeq === savedSeq. With Auto-Save on (the default) a backup follows a change after a short quiet moment (and at the latest 8 s after the first unsaved change, however
+  // long the user keeps working); with it off only Ctrl+S / the Save button back up. Writing is one atomic IndexedDB transaction, so a failure or an interrupted save leaves the
+  // previous backup untouched, and the previous backup is kept as a fallback (session-prev) in case the newest one is ever damaged.
+  scheduleAutosave() {
+    this.changeSeq++;
+    if (prefs.get("autoSave") && !this.autosavePaused) {
+      const now = Date.now(); this.firstChangeAt = this.firstChangeAt || now;
+      clearTimeout(this.autosaveTimer);
+      this.autosaveTimer = setTimeout(() => this.autosave(), Math.max(0, Math.min(AUTOSAVE_QUIET_MS, this.firstChangeAt + AUTOSAVE_MAX_WAIT_MS - now)));
+    }
+    this.refreshSaveStatus();
+  }
+  /** Back up when the page is being hidden or closed (only if a backup was waiting). */
+  flushAutosave() { if (this.autosaveTimer) { clearTimeout(this.autosaveTimer); this.autosaveTimer = 0; this.autosave(true); } }
+  async backup({ force = false, manual = false } = {}) {
+    clearTimeout(this.autosaveTimer); this.autosaveTimer = 0; this.firstChangeAt = 0;
+    if (this.autosavePaused) return false;                                       // (an old backup that could not be read is kept, not overwritten, until the user decides)
+    if (this.autosaveOk && this.savedAt && this.changeSeq === this.savedSeq && !this.backing) return true;          // nothing changed since the last verified backup: nothing to write
+    if (this.backing) { this.backupAgain = true; return false; }
+    // collecting the data closes an open text editor: never do that in the middle of typing, unless the user asked (Save) or the page is going away
+    if (!force && !manual && Object.values(this.panels).some((p) => p.editing)) { this.autosaveTimer = setTimeout(() => this.autosave(), 1500); return false; }
+    this.backing = true; const seq = this.changeSeq; this.refreshSaveStatus();
+    try {
+      await this.writeBackup();
+      this.savedSeq = seq; this.savedAt = Date.now(); this.autosaveOk = true; this.autosaveError = null;
+      if (!this._persistAsked) { this._persistAsked = true; try { navigator.storage && navigator.storage.persist && navigator.storage.persist().catch(() => {}); } catch { /* not supported */ } }      // (asks the browser not to evict the backup)
+      return true;
+    } catch (e) {
+      console.warn("backup failed", e); DX.record("backup", e); this._written.clear();
+      const was = this.autosaveOk; this.autosaveOk = false;
+      this.autosaveError = e && e.name === "QuotaExceededError" ? "this device is out of storage space" : (e && e.message) || "the browser refused to store it";
+      if (was || manual) toast("Could not back up your work on this device (" + this.autosaveError + "). Export the workspace to keep a copy.", 7000);
+      return false;
+    } finally {
+      this.backing = false;
+      if (this.backupAgain) { this.backupAgain = false; if (prefs.get("autoSave")) this.autosaveTimer = setTimeout(() => this.autosave(), 150); }
+      this.refreshSaveStatus();
+    }
+  }
+  /** The write itself. Pages are stored one by one under their own ids (an unchanged page of a large notebook is never written again, a PDF is stored once per content hash); the
+   *  record that ties them together is written in the SAME transaction, so it can never point at something that is missing. The write is read back and checked before it counts. */
+  async writeBackup() {
+    const d = this.collect({ all: true, lite: true }), rec = { version: 2, saved: Date.now(), settings: d.settings, board: d.board, board2: d.board2, links: d.links };
+    const used = new Set(), fresh = [];
+    const ref = (items) => { const id = this.partId(items); used.add(id); if (!this._written.has(id)) fresh.push([id, items]); return id; };
+    const nb = (key) => { const p = this.panels[key]; p.finishEdit(); return p.pages.map((q) => ({ ...M.pageMeta(q), part: ref(q.items) })); };
+    rec.notebook = nb("nb"); rec.notebook2 = !this.isPristine(this.panels.nb2) || this.order.includes("nb2") ? nb("nb2") : null;
+    const have = new Set((await idb.keys()).map(String)), puts = [], keep = new Set(), need = [];       // (what exists is known from the KEYS: a big PDF is not read back to find out)
+    for (const key of ["pdf", "pdf2"]) {
+      const p = d[key];
+      if (!p) { rec[key] = null; continue; }
+      const panel = this.panels[key].pdf;
+      panel.hash = panel.hash || await WS.sha256Hex(p.source);
+      const k = "pdf:" + panel.hash; keep.add(k); keep.add("ptxt:" + panel.hash); need.push(k);
+      if (!have.has(k)) puts.push([k, p.source]);
+      rec[key] = { name: p.name, hash: panel.hash, parts: p.pages.map((items) => ref(items)) };
+    }
+    for (const [id, items] of fresh) puts.push([id, items]);
+    const prev = await idb.get("session");
+    const prevOk = prev && (prev.version === 1 || prev.version === 2);
+    if (prevOk) puts.push(["session-prev", prev]);                              // (the last backup stays as the fallback)
+    puts.push(["session", rec]);
+    await idb.batch(puts);                                                      // ONE transaction: everything or nothing
+    // read it back: the record must be the one just written and everything it points at must be there
+    const back = await idb.get("session"), keys = new Set((await idb.keys()).map(String));
+    if (!back || back.saved !== rec.saved || [...used, ...need].some((k) => !keys.has(k))) throw new Error("the backup could not be read back");
+    for (const [id] of fresh) this._written.add(id);
+    // tidy up: pages and PDFs that neither the backup nor its fallback use any more
+    if (prevOk) { const pk = (r) => [...(r.notebook || []), ...(r.notebook2 || [])].map((x) => x.part).concat((r.pdf ? r.pdf.parts || [] : []), (r.pdf2 ? r.pdf2.parts || [] : [])); for (const id of pk(prev)) used.add(id); for (const r of [prev.pdf, prev.pdf2]) if (r && r.hash) { keep.add("pdf:" + r.hash); keep.add("ptxt:" + r.hash); } }
+    const dels = [];
+    for (const k of keys) { const x = String(k); if ((x.startsWith("pdf:") || x.startsWith("ptxt:")) && !keep.has(x)) dels.push(x); else if (x.startsWith("pg:") && !used.has(x)) { dels.push(x); this._written.delete(x); } }
+    if (dels.length) await idb.batch([], dels);
+  }
+  autosave(force = false) { return this.backup({ force }); }
+  /** Ctrl+S / the Save button: back up right now (works with Auto-Save off too). */
+  async saveNow() {
+    if (this.autosavePaused) { toast("The previous backup is still waiting for your decision (reload the page to choose).", 4200); return false; }
+    const ok = await this.backup({ manual: true });
+    if (ok) toast("Saved on this device", 1400);
+    return ok;
+  }
   flushAutosave() { if (this.autosaveTimer) { clearTimeout(this.autosaveTimer); this.autosave(true); } }
-  /** Id under which the items of a page are kept in the session backup. Items are never edited in place (an edit makes a new array), so an unchanged page keeps its id. */
+  /** Id under which the items of a page are kept in the backup. Items are never edited in place (an edit makes a new array), so an unchanged page keeps its id. */
   partId(items) {
     let id = this._partIds.get(items);
     if (!id) { id = "pg:" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); this._partIds.set(items, id); }
     return id;
   }
-  /** The session backup is written page by page: only pages whose items changed since the last backup are written again (a large notebook is not copied in full every few seconds). */
-  async autosave(force = false) {
-    this.autosaveTimer = 0;
-    if (this.autosavePaused) { this.refreshSaveStatus(); return; }               // (an old session that could not be restored is still stored: it is not overwritten until the user decides)
-    // collecting the data closes any open text editor: never do that in the middle of typing (wait until the user is done)
-    if (!force && Object.values(this.panels).some((p) => p.editing)) { this.scheduleAutosave(); return; }
-    try {
-      const d = this.collect({ all: true, lite: true }), rec = { version: 2, saved: Date.now(), settings: d.settings, board: d.board, board2: d.board2, links: d.links };
-      const used = new Set(), fresh = [];
-      const ref = (items) => { const id = this.partId(items); used.add(id); if (!this._written.has(id)) fresh.push([id, items]); return id; };
-      const nb = (key) => { const p = this.panels[key]; p.finishEdit(); return p.pages.map((q) => ({ ...M.pageMeta(q), part: ref(q.items) })); };
-      rec.notebook = nb("nb"); rec.notebook2 = !this.isPristine(this.panels.nb2) || this.order.includes("nb2") ? nb("nb2") : null;
-      const keep = new Set();
-      for (const key of ["pdf", "pdf2"]) {
-        const p = d[key];
-        if (!p) { rec[key] = null; continue; }
-        const panel = this.panels[key].pdf;
-        panel.hash = panel.hash || await WS.sha256Hex(p.source);
-        const k = "pdf:" + panel.hash; keep.add(k); keep.add("ptxt:" + panel.hash);
-        if (!(await idb.get(k))) await idb.set(k, p.source);
-        rec[key] = { name: p.name, hash: panel.hash, parts: p.pages.map((items) => ref(items)) };
-      }
-      for (const [id, items] of fresh) { await idb.set(id, items); this._written.add(id); }
-      await idb.set("session", rec);                                   // (written last: it only ever points at parts that exist)
-      for (const k of await idb.keys()) {
-        const s = String(k);
-        if ((s.startsWith("pdf:") || s.startsWith("ptxt:")) && !keep.has(k)) await idb.del(k);          // (ptxt: = the text of a PDF, kept for search)
-        else if (s.startsWith("pg:") && !used.has(s)) { await idb.del(k); this._written.delete(s); }
-      }
-      this.autosaveOk = true; this.autosaveError = null;
-    } catch (e) {
-      console.warn("autosave failed", e); DX.record("autosave", e); this._written.clear();
-      const was = this.autosaveOk; this.autosaveOk = false;
-      this.autosaveError = e && e.name === "QuotaExceededError" ? "this device is out of storage space" : (e && e.message) || "the browser refused to store it";
-      if (was) toast("Could not back up your work on this device (" + this.autosaveError + "). Save the workspace to a file.", 7000);
+  /** Read one stored backup ("session" or "session-prev") back into a workspace. Throws when anything it needs is missing or unreadable (never a half-restored workspace). */
+  async loadBackup(key) {
+    const rec = await idb.get(key);
+    if (!rec || (rec.version !== 1 && rec.version !== 2)) return null;
+    const ids = [];
+    if (rec.version === 2) {                                         // pages are stored separately: put them back together
+      const nb = async (pgs) => (pgs ? Promise.all(pgs.map(async (m) => { const items = await idb.get(m.part); if (!Array.isArray(items)) throw new Error("a page of the backup is missing"); ids.push([m.part, items]); return { ...m, items }; })) : null);
+      rec.notebook = await nb(rec.notebook); rec.notebook2 = await nb(rec.notebook2);
+      for (const k of ["pdf", "pdf2"]) if (rec[k]) { rec[k].pages = await Promise.all(rec[k].parts.map((id) => idb.get(id))); if (rec[k].pages.some((x) => !Array.isArray(x))) throw new Error("a PDF page of the backup is missing"); rec[k].pages.forEach((x, i) => ids.push([rec[k].parts[i], x])); }
     }
-    this.refreshSaveStatus();
+    const bd = (b) => (b ? M.parseBoard(M.boardToJson(b)) : null);       // sanitised copy
+    const ws = { links: rec.links || null, settings: rec.settings || {}, board: bd(rec.board), board2: bd(rec.board2), notebook: M.parseNotebook(M.notebookToJson(rec.notebook)), notebook2: rec.notebook2 ? M.parseNotebook(M.notebookToJson(rec.notebook2)) : null };
+    for (const k of ["pdf", "pdf2"]) {
+      const r = rec[k]; if (!r) continue;
+      const source = await idb.get("pdf:" + r.hash);
+      if (!source) throw new Error("the PDF of the backup is missing");           // (never silently dropped: the next backup would then lose it for good)
+      const pages = M.parsePdfAnnotations(M.pdfAnnotationsToJson(r.pages), r.pages.length);
+      if (pages) ws[k] = { name: r.name, source, pages };
+    }
+    const empty = !ws.pdf && !ws.pdf2 && ws.notebook.every((p) => !p.items.length) && (!ws.notebook2 || ws.notebook2.every((p) => !p.items.length)) && !ws.board?.items.length && !ws.board2?.items.length;
+    return empty ? null : { ws, rec };
   }
   async restoreAutosave() {
-    try {
-      const rec = await idb.get("session");
-      if (!rec || (rec.version !== 1 && rec.version !== 2)) return false;
-      if (rec.version === 2) {                                         // pages are stored separately: put them back together
-        const nb = async (pgs) => (pgs ? Promise.all(pgs.map(async (m) => { const items = await idb.get(m.part); if (!Array.isArray(items)) throw new Error("backup page missing"); return { ...m, items }; })) : null);
-        rec.notebook = await nb(rec.notebook); rec.notebook2 = await nb(rec.notebook2);
-        for (const key of ["pdf", "pdf2"]) if (rec[key]) { rec[key].pages = await Promise.all(rec[key].parts.map((id) => idb.get(id))); if (rec[key].pages.some((x) => !Array.isArray(x))) throw new Error("backup page missing"); }
-      }
-      const bd = (b) => (b ? M.parseBoard(M.boardToJson(b)) : null);       // sanitised copy
-      const ws = { links: rec.links || null, settings: rec.settings || {}, board: bd(rec.board), board2: bd(rec.board2), notebook: M.parseNotebook(M.notebookToJson(rec.notebook)), notebook2: rec.notebook2 ? M.parseNotebook(M.notebookToJson(rec.notebook2)) : null, pdf: null, pdf2: null };
-      for (const key of ["pdf", "pdf2"]) {
-        const r = rec[key]; if (!r) continue;
-        const source = await idb.get("pdf:" + r.hash);
-        if (!source) continue;
-        const pages = M.parsePdfAnnotations(M.pdfAnnotationsToJson(r.pages), r.pages.length);
-        if (pages) ws[key] = { name: r.name, source, pages };
-      }
-      const empty = !ws.pdf && !ws.pdf2 && ws.notebook.every((p) => !p.items.length) && (!ws.notebook2 || ws.notebook2.every((p) => !p.items.length))
-        && !ws.board?.items.length && !ws.board2?.items.length;
-      if (empty) return false;
-      await this.restore(ws);
-      // The restored work only exists in this browser's storage, not in a file: keep it marked unsaved,
-      // so "New", closing and similar actions still offer to save it.
-      for (const p of Object.values(this.panels)) { p.dirty = p.pages.some((q) => q.items.length > 0); p.ui(); }
-      toast("Your last session was restored.");
-      return true;
-    } catch (e) {
-      console.warn("could not restore the last session", e); DX.record("restore", e);
-      // the stored session is kept and is NOT overwritten by the next automatic backup until the user decides
-      this.autosavePaused = true; this.refreshSaveStatus();
-      const c = await dialog({ title: "Your last session could not be restored", content: "The backup of your last session on this device is damaged or incomplete (" + (e && e.message || "unknown error") + "). It has not been deleted. You can start with an empty workspace, or keep the backup untouched for now (automatic backup stays off until you start a new workspace).",
-        buttons: [{ label: "Keep the backup, work without backup", value: "keep" }, { label: "Discard it and start fresh", value: "fresh", danger: true, primary: true }] });
-      if (c === "fresh") { try { await idb.del("session"); } catch { /* ignore */ } this.autosavePaused = false; this.refreshSaveStatus(); }
-      return false;
+    let got = null, err = null, fromPrev = false;
+    try { got = await this.loadBackup("session"); } catch (e) { err = e; console.warn("the latest backup could not be read", e); DX.record("restore", e); }
+    if (!got && err) { try { got = await this.loadBackup("session-prev"); fromPrev = !!got; } catch (e2) { console.warn("the previous backup could not be read either", e2); DX.record("restore", e2); } }
+    if (got) {
+      try {
+        await this.restore(got.ws);
+        // what is on screen IS the backup now: its pages keep their stored ids, so the next backup does not write them again, and the state counts as saved
+        for (const [key, pg] of [["nb", got.rec.notebook], ["nb2", got.rec.notebook2]]) if (pg) pg.forEach((m, i) => { const q = this.panels[key].pages[i]; if (q) { this._partIds.set(q.items, m.part); this._written.add(m.part); } });
+        for (const key of ["pdf", "pdf2"]) { const r = got.rec[key]; if (r && this.panels[key].pages) r.parts.forEach((id, i) => { const q = this.panels[key].pages[i]; if (q) { this._partIds.set(q.items, id); this._written.add(id); } }); }
+        clearTimeout(this.autosaveTimer); this.autosaveTimer = 0; this.firstChangeAt = 0; this.savedSeq = this.changeSeq; this.savedAt = got.rec.saved || Date.now();
+        for (const p of Object.values(this.panels)) { p.dirty = p.pages.some((q) => q.items.length > 0); p.ui(); }          // (not exported to a file yet: "New" and "Open" still offer to export it)
+        toast(fromPrev ? "The newest backup was damaged: your work was restored from the one before it." : "Your last session was restored.", fromPrev ? 5000 : 2600);
+        this.refreshSaveStatus();
+        return true;
+      } catch (e) { err = e; console.warn("restoring failed", e); DX.record("restore", e); }
     }
+    if (!err) return false;                                         // nothing stored: a fresh start
+    // neither backup can be used: they are kept, NOT overwritten by the next automatic backup, until the user decides
+    this.autosavePaused = true; this.refreshSaveStatus();
+    const c = await dialog({ title: "Your last session could not be restored", content: "The backups of your last session on this device are damaged or incomplete (" + (err && err.message || "unknown error") + "). They have not been deleted. You can start with an empty workspace, or keep them untouched for now (automatic backup stays off until you start a new workspace).",
+      buttons: [{ label: "Keep the backups, work without backup", value: "keep" }, { label: "Discard them and start fresh", value: "fresh", danger: true, primary: true }] });
+    if (c === "fresh") { try { await idb.batch([], ["session", "session-prev"]); } catch { /* ignore */ } this.autosavePaused = false; this.refreshSaveStatus(); }
+    return false;
   }
 }
 
@@ -701,6 +738,7 @@ export async function start() {
   window.noteflow = app;
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(() => {});
   try { await navigator.storage?.persist?.(); } catch { /* ignore */ }
-  await app.restoreAutosave();
+  const restored = await app.restoreAutosave();
+  if (!restored && !app.autosavePaused) { app.savedSeq = app.changeSeq; clearTimeout(app.autosaveTimer); app.autosaveTimer = 0; app.firstChangeAt = 0; app.refreshSaveStatus(); }      // (an empty new workspace has nothing to lose: it starts as "Saved")
   return app;
 }

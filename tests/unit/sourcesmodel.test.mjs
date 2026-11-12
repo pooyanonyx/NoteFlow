@@ -35,3 +35,18 @@ test("what counts as a note that needs a source", () => {
   const t = (d) => d.text;
   assert.ok(needsSource({ t: "text", text: "x".repeat(30) }, t)); assert.ok(!needsSource({ t: "text", text: "short" }, t)); assert.ok(!needsSource({ t: "pen", text: "x".repeat(30) }, t));
 });
+
+import { pairOf, cardsForPdfPage, cardsForItems, cardsForAll } from "../../js/sourcesmodel.js";
+test("a link is a card with a source (PDF end) and a note, whichever way round it was made", () => {
+  const s = new LinkStore(); s.add(item("n1"), pdf(4)); s.add(pdf(5), item("n2")); s.add(item("n3"), item("n4"));
+  const [a, b, c] = s.all().map(pairOf);
+  assert.equal(a.pdf.page, 4); assert.equal(a.note.id, "n1"); assert.equal(b.pdf.page, 5); assert.equal(b.note.id, "n2");
+  assert.equal(c.pdf, null); assert.equal(c.note.id, "n3"); assert.equal(c.related.id, "n4");
+});
+test("scope PDF page: its cards, top to bottom; scope notebook page: the cards of the notes on it (each link once) and the notes without a source; scope everything: grouped by PDF page", () => {
+  const s = mk();
+  assert.deepEqual(cardsForPdfPage(s, { doc: DOC, page: 4 }).map((c) => c.note.id), ["n3", "n2", "n1"], "whole page, region, passage");
+  const items = [{ t: "text", id: "n1", text: "TCP handshake notes with enough words to matter" }, { t: "text", id: "n6", text: "The note that n1 is linked to, with enough words" }, { t: "text", text: "A long note without any source at all, so it is listed" }];
+  const r = cardsForItems(s, items); assert.equal(r.cards.length, 2, "n1 to the PDF and n1 to n6: the n1-n6 link is counted once"); assert.equal(r.unsourced.length, 1);
+  const all = cardsForAll(s); assert.deepEqual(all.groups.map((g) => [g.page, g.cards.length]), [[4, 3], [9, 2]]); assert.equal(all.notes.length, 1);
+});

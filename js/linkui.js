@@ -222,14 +222,15 @@ export class LinkController {
   }
   makeQuote(anchor) {
     const q = this.quoteTarget(); this.cancel(); if (!q) return;
-    const text = String(anchor.quote.text).replace(/\s+/g, " ").trim(), rtl = /[\u0590-\u08FF]/.test(text), tail = `— ${anchor.name || "PDF"}, p. ${anchor.page + 1}`;
+    // Only what the reader selected goes into the note: no quotation marks, no file name, no page number. Where it came from is kept in the LINK (document identity, name, page,
+    // the passage and its boxes): the note shows the link mark, the Sources panel lists it, and following it opens the PDF at the passage.
+    const text = String(anchor.quote.text).replace(/\s+/g, " ").trim(), rtl = /[\u0590-\u08FF]/.test(text);
     const [pw] = q.pageDims(), w = Math.min(Math.max(120, pw - 100), 420), page = q.kind === "board" ? 0 : q.cur, st = q.groups.text || q.curStyle;
-    let d = { t: "text", x: rtl ? Math.max(20, pw - 50 - w) : 50, y: Math.max(20, q.belowBars(page) + 10), w, dir: rtl ? "rtl" : "ltr", align: rtl ? "right" : "left", text: `“${text}”\n${tail}`, color: st.color, size: Math.min(st.size || 18, 18), alpha: 255, bright: 0,
-      runs: [{ s: `“${text}”\n`, i: 1 }, { s: tail }] };
+    let d = { t: "text", x: rtl ? Math.max(20, pw - 50 - w) : 50, y: Math.max(20, q.belowBars(page) + 10), w, dir: rtl ? "rtl" : "ltr", align: rtl ? "right" : "left", text, color: st.color, size: Math.min(st.size || 18, 18), alpha: 255, bright: 0 };
     M.ensureId(d);
-    const idx = q.items.length; q.commit([...q.items, q.settle(d)], { select: idx });
+    const idx = q.items.length; q.commit([...q.items, q.adaptToPage(d)], { select: idx });
     const a = this.itemAnchor(q, idx, page); if (a) this.store.add(a, anchor);
-    this.app.scheduleAutosave(); toast(`Quoted into ${q.label}, linked to ${anchor.name || "the PDF"} p. ${anchor.page + 1}.`, 3600);
+    this.app.scheduleAutosave(); toast(`Quote added to ${q.label} and linked to ${anchor.name || "the PDF"}, page ${anchor.page + 1}.`, 3600);
   }
   /** One end was chosen. */
   choose(anchor, panel) {

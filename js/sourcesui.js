@@ -1,9 +1,10 @@
-// The Sources panel: a docked side panel that follows the page the user is on.
-//   on a PDF page          -> the notes that cite it (a whole page, a region or a passage), and the other pages that have notes
-//   on a notebook / board  -> which sources the notes on the page cite, and which long notes cite none yet
+// The side panel: Sources, Pages (thumbnails) and Outline (bookmarks).
+// Sources answers ONE question: which PDF passages do my notes come from? Every link is shown as the same card (the PDF source and its passage, the note that cites it,
+// three labelled buttons), and a scope you choose says which links to list: those of the PDF page you are reading, of the notebook page you are writing, or everything.
+// The list never changes by itself when you click around: only the scope buttons and the pages change it.
 // It only reads the link store and the open panels; it recomputes (at most every 150 ms) only while it is open.
 import { el, icon, toast } from "./ui.js";
-import { forPdfPage, forItems } from "./sourcesmodel.js";
+import { forPdfPage, cardsForPdfPage, cardsForItems, cardsForAll } from "./sourcesmodel.js";
 import { itemPreview } from "./linkui.js";
 import { anchorShape } from "./links.js";
 import { outlineOf, flattenOutline, Thumbs } from "./pdfnav.js";
@@ -29,7 +30,7 @@ export class SourcesPanel {
     for (const b of this.tabs.children) { const sel = b.dataset.tab === this.tab; b.classList.toggle("on", sel); b.setAttribute("aria-selected", String(sel)); }
     if (on && !this.off) { this.off = this.app.links.store.onChange(() => this.refresh()); this.offBm = this.app.bookmarks.onChange(() => this.refresh()); }
     if (on) this.render();
-    else { if (this.off) { this.off(); this.off = null; } if (this.offBm) { this.offBm(); this.offBm = null; } clearTimeout(this.timer); this.timer = 0; this.dropThumbs(); this.body.replaceChildren(); }
+    else { if (this.off) { this.off(); this.off = null; } if (this.offBm) { this.offBm(); this.offBm = null; } clearTimeout(this.timer); this.timer = 0; this.dropThumbs(); this.scope = null; this.body.replaceChildren(); }
     for (const p of Object.values(this.app.panels)) p.onResize();            // (the panels share the width with it)
   }
   dropThumbs() { if (this.thumbs) { this.thumbs.destroy(); this.thumbs = null; } this.view = null; }
@@ -43,54 +44,86 @@ export class SourcesPanel {
     if (!this.open || this.timer) return;
     this.timer = setTimeout(() => { this.timer = 0; if (this.open) this.render(); }, 150);
   }
-  row(main, sub, { ok = true, onGo, onRemove, quote = false, icn = "note" } = {}) {
-    const go = el("button", { class: "srcgo" + (ok ? "" : " bad"), type: "button", onclick: onGo, title: ok ? "Go there" : "This link is broken" },
-      icon(icn), el("span", { class: "srctxt" }, el("span", { class: "srcmain" }, main), sub ? el("span", { class: "srcsub" + (quote ? " quote" : "") }, sub) : null));
-    return el("div", { class: "srcrow" }, go, onRemove ? el("button", { class: "btn small srcx", type: "button", title: "Remove this link", "aria-label": "Remove this link", onclick: onRemove }, icon("close")) : null);
+  /** The notebook / board the notes are in, and the PDF that is read: the active panel when it is of that kind, else the first one on screen. */
+  notePanel() {
+    const ok = (q) => q && (q.kind === "nb" || q.kind === "board") && q.hasPage && q.root && !q.root.hidden;
+    const a = this.app.active; if (ok(a)) return a;
+    return this.app.order.map((k) => this.app.panels[k]).find(ok) || null;
+  }
+  setScope(k) { this.scope = k; this.render(); }
+  /** One link, as a card: where it comes from (PDF, page, the passage), the note that cites it, and what you can do. Nothing on a card is clickable except its buttons. */
+  card(pair) {
+    const L = this.app.links, { link, pdf, note, related } = pair, dn = note ? L.describe(note) : { title: "(missing)", where: "", ok: false };
+    const dr = related ? L.describe(related) : null, dp = pdf ? L.describe(pdf) : null;
+    const shape = pdf ? anchorShape(pdf) : null, broken = (dp && !dp.ok) || !dn.ok || (dr && !dr.ok), why = (dp && !dp.ok && dp.where) || (!dn.ok && dn.where) || (dr && !dr.ok && dr.where) || "";
+    const btn = (label, title, fn, cls = "") => el("button", { class: "btn small " + cls, type: "button", title, onclick: fn }, label);
+    const noteRow = (d, label) => el("div", { class: "cardnote" }, icon("note"), el("div", { class: "cardtxt" }, el("span", { class: "cardlabel" }, label), el("span", { class: "cardtext", dir: "auto" }, clip(d.title, 160)), d.where && d.ok ? el("span", { class: "cardwhere" }, d.where) : null));
+    const kids = [];
+    if (pdf) {
+      kids.push(el("div", { class: "cardsrc" }, icon("pdf"), el("div", { class: "cardtxt" }, el("span", { class: "cardlabel" }, "PDF source"), el("b", {}, `${pdf.name || "PDF"} · page ${pdf.page + 1}`)),
+        el("span", { class: "tag " + shape }, shape === "text" ? "Passage" : shape === "region" ? "Region" : "Whole page")));
+      if (shape === "text") kids.push(el("blockquote", { class: "cardquote", dir: "auto" }, clip(pdf.quote.text, 260)));
+    } else kids.push(el("div", { class: "cardsrc" }, icon("link"), el("div", { class: "cardtxt" }, el("span", { class: "cardlabel" }, "Linked notes")), el("span", { class: "tag" }, "Note ↔ note")));
+    kids.push(noteRow(dn, pdf ? "Your note" : "Note"));
+    if (dr) kids.push(noteRow(dr, "Related note"));
+    if (broken) kids.push(el("div", { class: "cardbad", role: "alert" }, "This link is broken" + (why ? `: ${why}` : ".")));
+    const from = this.app.active;
+    kids.push(el("div", { class: "cardact" },
+      ...(pdf ? [btn("Open in PDF", "Go to this place in the PDF", () => L.go(pdf, { link, from }), "primary")] : []),
+      btn(pdf ? "Show note" : "Show note", "Go to the note", () => L.go(note, { link, from }), pdf ? "" : "primary"),
+      ...(related ? [btn("Show related", "Go to the other note", () => L.go(related, { link, from }))] : []),
+      btn("Unlink", "Remove this link (the note and the PDF are not changed)", () => { this.app.links.store.remove(link.id); this.app.scheduleAutosave(); }, "quiet")));
+    return el("article", { class: "card" + (broken ? " broken" : ""), "aria-label": pdf ? `Link from ${pdf.name || "PDF"} page ${pdf.page + 1}` : "Link between notes" }, ...kids);
   }
   render() {
     this.tabs.querySelectorAll(".srctab").forEach((b) => { const sel = b.dataset.tab === this.tab; b.classList.toggle("on", sel); b.setAttribute("aria-selected", String(sel)); });
     if (this.tab === "pages") { this.renderPages(); return; }
     if (this.tab === "outline") { this.renderOutline(); return; }
     this.dropThumbs();
-    const app = this.app, p = app.active, L = app.links, store = L.store, b = this.body, kids = [];
-    const section = (title, ...rows) => el("section", { class: "srcsec" }, el("h3", {}, title), ...rows);
-    const actions = (...btns) => el("div", { class: "srcact" }, ...btns);
-    const quoteBtn = el("button", { class: "btn small", type: "button", title: "Drag across text in the PDF: the passage goes into your notes as a quote, linked to where it came from", onclick: () => L.quote() }, "Quote a passage");
-    const checkBtn = el("button", { class: "btn small", type: "button", title: "Look for matches between the pages you are looking at", onclick: () => app.smart.scan({ manual: true }) }, "Check this page");
-    const rm = (link) => () => { store.remove(link.id); app.scheduleAutosave(); };
-    if (!p || !p.hasPage) kids.push(el("p", { class: "srcempty" }, "Open a PDF or a notebook: the sources of the page you are on appear here."));
-    else if (p.kind === "pdf") {
-      const hash = p.pdf && p.pdf.hash, page = p.shown();
-      kids.push(el("div", { class: "srcctx" }, `${p.name || "PDF"} · page ${page + 1}`));
-      if (!hash) kids.push(el("p", { class: "srcempty" }, "This PDF has no identity here (an insecure page), so it cannot be linked."));
+    const app = this.app, L = app.links, store = L.store, kids = [];
+    const pdfP = this.pdfPanel(), noteP = this.notePanel();
+    if (!this.scope) this.scope = app.active && app.active.kind === "pdf" ? "pdf" : app.active && (app.active.kind === "nb" || app.active.kind === "board") ? "notes" : pdfP ? "pdf" : "notes";
+    const scopes = [["pdf", "PDF page", "The links of the PDF page you are reading"], ["notes", "Notebook page", "The links of the notes on the page you are writing"], ["all", "Everything", "All links of this workspace"]];
+    kids.push(el("div", { class: "srcscope", role: "radiogroup", "aria-label": "Which links to show" }, ...scopes.map(([k, l, t]) => el("button", { class: "btn small" + (this.scope === k ? " on" : ""), type: "button", role: "radio", "aria-checked": String(this.scope === k), title: t, onclick: () => this.setScope(k) }, l))));
+    const checkBtn = el("button", { class: "btn small", type: "button", title: "Look for notes and PDF passages that match, between the pages you are looking at", onclick: () => app.smart.scan({ manual: true }) }, "Find matches");
+    const quoteBtn = el("button", { class: "btn small primary", type: "button", title: "Drag across text in the PDF: that text goes into your notes, linked to where it came from", onclick: () => L.quote() }, "Quote from PDF");
+    const sugg = app.smart.suggestions.length;
+    const empty = (t) => el("p", { class: "srcempty" }, t);
+    const heading = (t, n) => el("h3", {}, n === undefined ? t : `${t} (${n})`);
+    if (this.scope === "pdf") {
+      const p = pdfP, hash = p && p.pdf && p.pdf.hash, page = p ? p.shown() : 0;
+      kids.push(el("div", { class: "srcctx" }, p ? `${p.name || "PDF"} · page ${page + 1}` : "No PDF open"));
+      if (!p) kids.push(empty("Open a PDF to see which notes cite its pages."));
+      else if (!hash) kids.push(empty("This PDF cannot be linked here (the page is not secure)."));
       else {
-        const { rows, others } = forPdfPage(store, { doc: hash, page, pageCount: p.pages.length });
-        kids.push(rows.length ? section(`Notes citing this page (${rows.length})`, ...rows.map((r) => {
-          const d = L.describe(r.other), shape = r.shape;
-          return this.row(clip(d.title, 90), shape === "text" ? `“${clip(r.quote, 120)}”` : shape === "region" ? "A region of this page" : "The whole page", { ok: d.ok, quote: shape === "text", icn: r.other.k === "pdf" ? "pdf" : "note", onGo: () => L.go(r.other, { link: r.link, from: p }), onRemove: rm(r.link) });
-        })) : el("p", { class: "srcempty" }, "No notes cite this page yet. Select a note and press Link, or quote a passage."));
-        if (others.length) kids.push(section("Other pages with notes", el("div", { class: "srcchips" }, ...others.map((o) => el("button", { class: "btn small", type: "button", title: `Go to page ${o.page + 1}`, onclick: () => p.goto(o.page) }, `p. ${o.page + 1} · ${o.count}`)))));
+        const cards = cardsForPdfPage(store, { doc: hash, page }), { others } = forPdfPage(store, { doc: hash, page, pageCount: p.pages.length });
+        kids.push(cards.length ? el("section", { class: "srcsec" }, heading("Notes citing this page", cards.length), ...cards.map((c) => this.card(c))) : empty("No note cites this page yet. Quote from the PDF, or select a note and press Link."));
+        if (others.length) kids.push(el("section", { class: "srcsec" }, heading("Other pages with links"), el("div", { class: "srcchips" }, ...others.map((o) => el("button", { class: "btn small", type: "button", title: `Go to page ${o.page + 1}`, onclick: () => p.goto(o.page) }, `p. ${o.page + 1} · ${o.count}`)))));
       }
-      kids.push(actions(quoteBtn, checkBtn));
+    } else if (this.scope === "notes") {
+      const p = noteP, page = p ? (p.kind === "board" ? 0 : p.cur) : 0, items = p && p.pages[page] ? p.pages[page].items : [];
+      kids.push(el("div", { class: "srcctx" }, p ? (p.kind === "board" ? p.label || "Board" : `${p.label || "Notebook"} · page ${page + 1}`) : "No notebook open"));
+      if (!p) kids.push(empty("Open a notebook or a board to see the sources of its notes."));
+      else {
+        const { cards, unsourced } = cardsForItems(store, items, { textOf: (d) => d.text, previewOf: (d) => itemPreview(d) });
+        kids.push(cards.length ? el("section", { class: "srcsec" }, heading("Links on this page", cards.length), ...cards.map((c) => this.card(c))) : empty("Nothing on this page is linked yet."));
+        if (unsourced.length) kids.push(el("section", { class: "srcsec" }, heading("Notes with no source", unsourced.length), el("p", { class: "srchint" }, "Longer notes that are not linked to a PDF passage."),
+          ...unsourced.slice(0, 6).map((u) => el("div", { class: "srcplain" }, el("span", { class: "srcplaintxt", dir: "auto" }, clip(u.preview, 90)), el("button", { class: "btn small", type: "button", onclick: () => this.showItem(p, page, u.index) }, "Show"))),
+          unsourced.length > 6 ? el("p", { class: "srchint" }, `and ${unsourced.length - 6} more`) : null));
+      }
     } else {
-      const page = p.kind === "board" ? 0 : p.cur, items = p.pages[page] ? p.pages[page].items : [];
-      kids.push(el("div", { class: "srcctx" }, p.kind === "board" ? `${p.label || "Board"}` : `${p.label || "Notebook"} · page ${page + 1}`));
-      const { cited, unsourced } = forItems(store, items, { textOf: (d) => d.text, previewOf: (d) => itemPreview(d) });
-      if (cited.length) kids.push(section(`Sources used on this page (${cited.length})`, ...cited.map((c) => el("div", { class: "srcgroup" },
-        el("button", { class: "srcitem", type: "button", title: "Show this note", onclick: () => this.showItem(p, page, c.index) }, clip(itemPreview(c.item), 70)),
-        ...c.links.map(({ link, other }) => {
-          const d = L.describe(other), shape = anchorShape(other), isQuote = other.k === "pdf" && shape === "text";
-          const main = other.k === "pdf" ? `${other.name || "PDF"} · p. ${other.page + 1}${shape === "region" ? " · region" : ""}` : d.title;
-          return this.row(clip(main, 90), isQuote ? `“${clip(other.quote.text, 120)}”` : (other.k === "pdf" ? "" : d.where || ""), { ok: d.ok, quote: isQuote, icn: other.k === "pdf" ? "pdf" : "note", onGo: () => L.go(other, { link, from: p }), onRemove: rm(link) });
-        })))));
-      if (unsourced.length) kids.push(section(`Notes without a source (${unsourced.length})`, ...unsourced.slice(0, 12).map((u) => this.row(clip(u.preview, 90), "Press Link to connect it to a PDF passage", { icn: "note", onGo: () => this.showItem(p, page, u.index) })),
-        unsourced.length > 12 ? el("p", { class: "srcempty" }, `…and ${unsourced.length - 12} more`) : null));
-      if (!cited.length && !unsourced.length) kids.push(el("p", { class: "srcempty" }, "Nothing to cite on this page yet. Write a note, then link it to the PDF passage it comes from."));
-      kids.push(actions(quoteBtn, checkBtn));
+      const all = cardsForAll(store), total = store.size;
+      kids.push(el("div", { class: "srcctx" }, `${total} link${total === 1 ? "" : "s"} in this workspace`));
+      if (!total) kids.push(empty("No links yet. Quote from a PDF, or select a note and press Link."));
+      const cap = 60; let shown = 0;
+      for (const g of all.groups) { if (shown >= cap) break; kids.push(el("section", { class: "srcsec" }, el("h3", {}, `${g.name || "PDF"} · page ${g.page + 1}`), ...g.cards.slice(0, cap - shown).map((c) => this.card(c)))); shown += g.cards.length; }
+      if (all.notes.length && shown < cap) kids.push(el("section", { class: "srcsec" }, heading("Links between notes", all.notes.length), ...all.notes.slice(0, cap - shown).map((c) => this.card(c))));
+      if (total > cap) kids.push(el("p", { class: "srchint" }, `Showing the first ${cap}. Choose a page scope to see the rest.`));
     }
-    kids.push(el("div", { class: "srcfoot" }, el("span", {}, `${store.size} link${store.size === 1 ? "" : "s"} in this workspace`), el("button", { class: "btn small", type: "button", onclick: () => L.manage() }, "All links…")));
-    b.replaceChildren(...kids.filter(Boolean));
+    const top = el("div", { class: "srcact" }, quoteBtn, checkBtn);
+    kids.splice(1, 0, top);
+    if (sugg) kids.splice(2, 0, el("div", { class: "srcsugg", role: "status" }, el("span", {}, `${sugg} suggested link${sugg === 1 ? "" : "s"} waiting for your answer`), el("button", { class: "btn small", type: "button", onclick: () => app.smart.showCard() }, "Review")));
+    this.body.replaceChildren(...kids.filter(Boolean));
   }
   // ------------------------------------------------------------ Pages: thumbnails (drawn when they scroll into view, built once per document)
   renderPages() {

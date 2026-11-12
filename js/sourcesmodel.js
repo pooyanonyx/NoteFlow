@@ -31,3 +31,36 @@ export function forItems(store, items, { textOf = (d) => d.text, previewOf = (d)
   });
   return { cited, unsourced };
 }
+
+// ------------------------------------------------------------------ the cards of the Sources tab
+/** A link as a card: the PDF end (the source) and the note end, whichever way round it was made. A link between two notes has no source: { pdf: null, note, related }. */
+export function pairOf(link) {
+  const ends = [link.a, link.b], pdf = ends.find((e) => e.k === "pdf") || null;
+  if (pdf) return { link, pdf, note: ends.find((e) => e !== pdf) || null, related: null };
+  return { link, pdf: null, note: link.a, related: link.b };
+}
+const yOf = (p) => (p.pdf ? (p.pdf.rect ? p.pdf.rect[1] : p.pdf.quote && p.pdf.quote.rects[0] ? p.pdf.quote.rects[0][1] : -1) : 0);
+
+/** Scope "PDF page": every link to that page of that PDF, top of the page first. */
+export function cardsForPdfPage(store, { doc, page }) {
+  return store.forPdfPage(doc, page).map(pairOf).sort((a, b) => yOf(a) - yOf(b));
+}
+/** Scope "Notebook page": every link of the notes (items with an id) on that page, in page order; plus the long notes that have none. */
+export function cardsForItems(store, items, opts) {
+  const { cited, unsourced } = forItems(store, items, opts), cards = [], seen = new Set();
+  for (const c of cited) for (const { link } of c.links) if (!seen.has(link.id)) { seen.add(link.id); cards.push(pairOf(link)); }
+  return { cards, unsourced };
+}
+/** Scope "Everything": all links, those to a PDF grouped by document and page (in page order), links between notes last. */
+export function cardsForAll(store) {
+  const groups = new Map(), notes = [];
+  for (const l of store.all()) {
+    const p = pairOf(l);
+    if (!p.pdf) { notes.push(p); continue; }
+    const key = p.pdf.doc + ":" + String(p.pdf.page).padStart(6, "0");
+    if (!groups.has(key)) groups.set(key, { name: p.pdf.name, page: p.pdf.page, doc: p.pdf.doc, cards: [] });
+    groups.get(key).cards.push(p);
+  }
+  const out = [...groups.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([, g]) => ({ ...g, cards: g.cards.sort((a, b) => yOf(a) - yOf(b)) }));
+  return { groups: out, notes };
+}

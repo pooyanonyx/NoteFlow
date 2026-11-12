@@ -67,7 +67,10 @@ export function contentTokens(text) {
   const out = [];
   // Persian verbs: "می‌کند", "می‌سازند" are written with a prefix that is a separate word (or joined by a ZWNJ, which the folding removes, so it would become ONE long
   // word that nothing else matches and that only dilutes the score). The prefix is dropped and the verb marked; its personal ending is dropped below.
-  const src = String(text ?? "").replace(FA_VERB, (_, v) => v + VERB_MARK);
+  // Text taken from a PDF: a word broken at the end of a line ("connec-" / "tion") is one word again, soft hyphens are dropped, and ligatures / Arabic presentation forms
+  // (ﬁ, ﬂ, ﻻ, ...) become the letters they stand for. Only matching looks at the result: the text itself, and every position in it, is left as it is.
+  const joined = String(text ?? "").replace(/\u00AD/g, "").replace(/(\p{L})[\u2010\u2011-][ \t]*\n[ \t]*(?=\p{Ll})/gu, "$1").replace(/[\uFB00-\uFB06\uFB50-\uFDFF\uFE70-\uFEFF]/g, (c) => c.normalize("NFKC"));
+  const src = joined.replace(FA_VERB, (_, v) => v + VERB_MARK);
   for (const m of normalize(src).matchAll(WORD)) {
     let w = m[0], verb = false;
     if (w.endsWith(VERB_MARK)) { w = w.slice(0, -1); verb = true; }
@@ -130,21 +133,45 @@ const mkPart = (text, s, e) => { while (s < e && /\s/.test(text[s])) s++; while 
 function partsOfRange(text, s = 0, e = text.length) {
   return sentenceSpans(text.slice(s, e)).map(([a, b]) => { const p = mkPart(text, s + a, s + b); p.cl = clausesOf(text, p.s, p.e); return p; });
 }
-/** Passages of a text: every run of 1-3 consecutive sentences up to maxWords words. [{ s, e, toks, nums, parts }] (s, e = offsets in the text; parts = its sentences, which findMatches can narrow the passage to). */
+/** The paragraphs of a text as [start, end) spans. A paragraph ends at a blank line ("\n\n": the PDF extractor puts one where the page's typesetting starts a new paragraph).
+ *  A text with no blank line at all (an older cached extraction, a plain text) is split where a SHORT line ended a sentence and the next line does not continue it. */
+export function paragraphSpans(text) {
+  const out = [], push = (a, b) => { while (a < b && /\s/.test(text[a])) a++; while (b > a && /\s/.test(text[b - 1])) b--; if (b - a >= 3) out.push([a, b]); };
+  const blocks = [], re = /\n[ \t]*\n/g; let at = 0;
+  for (let m; (m = re.exec(text)); ) { blocks.push([at, m.index]); at = m.index + m[0].length; }
+  blocks.push([at, text.length]);
+  if (blocks.length > 1) { for (const [a, b] of blocks) push(a, b); return out; }
+  const lines = text.split("\n"); if (lines.length < 4) { push(0, text.length); return out; }
+  const longest = Math.max(...lines.map((l) => l.trim().length)); let a = 0, pos = 0;
+  for (let k = 0; k < lines.length - 1; k++) {
+    const l = lines[k].trim(), nx = lines[k + 1].trim(); pos += lines[k].length + 1;
+    if (l.length && nx.length && l.length < 0.6 * longest && /[.!?؟…:]["”')\]]*$/.test(l) && !/^\p{Ll}/u.test(nx)) { push(a, pos - 1); a = pos; }
+  }
+  push(a, text.length); return out;
+}
+/** Passages of a text: runs of 1-3 consecutive sentences up to maxWords words, **never across a paragraph boundary**, and (for a paragraph of 4 or more sentences that is not
+ *  long) the whole paragraph. [{ s, e, toks, nums, parts, para }] (para = index in the returned list's .paragraphs [{ s, e, toks }]). */
 export function passagesOf(text, { maxWords = 80, maxPassages = 360 } = {}) {
-  const sent = partsOfRange(text);
-  const out = [];
-  for (let i = 0; i < sent.length && out.length < maxPassages; i++) {
-    let toks = [], words = 0; const nums = new Set();
-    for (let k = i; k < Math.min(sent.length, i + 3); k++) {
-      words += sent[k].words; if (words > maxWords && k > i) break;
-      toks = toks.concat(sent[k].toks); for (const n of sent[k].nums) nums.add(n);
-      if (toks.length >= 3) out.push({ s: sent[i].s, e: sent[k].e, toks, nums: new Set(nums), parts: sent.slice(i, k + 1) });
-      if (out.length >= maxPassages) break;
+  const out = []; out.paragraphs = [];
+  for (const [ps, pe] of paragraphSpans(text)) {
+    if (out.length >= maxPassages) break;
+    const sent = partsOfRange(text, ps, pe); if (!sent.length) continue;
+    const para = out.paragraphs.length; out.paragraphs.push({ s: ps, e: pe, toks: sent.flatMap((x) => x.toks) });
+    for (let i = 0; i < sent.length && out.length < maxPassages; i++) {
+      let toks = [], words = 0; const nums = new Set();
+      for (let k = i; k < Math.min(sent.length, i + 3); k++) {
+        words += sent[k].words; if (words > maxWords && k > i) break;
+        toks = toks.concat(sent[k].toks); for (const n of sent[k].nums) nums.add(n);
+        if (toks.length >= 3) out.push({ s: sent[i].s, e: sent[k].e, toks, nums: new Set(nums), parts: sent.slice(i, k + 1), para });
+        if (out.length >= maxPassages) break;
+      }
     }
+    const total = sent.reduce((a, x) => a + x.words, 0);
+    if (sent.length > 3 && total <= maxWords * 1.5 && out.length < maxPassages) { const nums = new Set(); for (const x of sent) for (const n of x.nums) nums.add(n); out.push({ s: sent[0].s, e: sent[sent.length - 1].e, toks: sent.flatMap((x) => x.toks), nums, parts: sent, para }); }
   }
   return out;
 }
+
 /** Units of a note's text: the text itself when it is one short block; a note of several lines (or a very long one) is judged line by line / sentence by sentence,
  *  so a note that mixes topics does not dilute the part that matches. [{ s, e, toks }] with at least 4 content words each. */
 export function noteUnits(text, { maxUnits = 8 } = {}) {
@@ -174,7 +201,7 @@ const negated = (t, u) => { if (t.length > u.length) [t, u] = [u, t]; return u =
 const sameRoot = (t, u) => { const m = Math.min(t.length, u.length); return m >= 4 && commonPrefix(t, u) >= Math.max(4, Math.ceil(0.66 * m)) && !negated(t, u); };
 // how much a kind of match is worth, as a share of an exact match
 // narrowing a passage: keep the smallest run of sentences with at least TRIM_KEEP of the best run's matched weight; a passage longer than 4 x the note's content words (at least TRIM_CAP_MIN words) is cut at clauses
-const TRIM_KEEP = 0.85, TRIM_CAP_MIN = 24;
+const TRIM_KEEP = 0.85, TRIM_CAP_MIN = 24, PARA_COVER_MIN = 0.25;
 export const CREDIT = { exact: 1, concept: 0.8, root: 0.6 }, GENERIC_WEIGHT = 0.45, RARITY_MIN_PASSAGES = 8;
 
 /** The words of `text` that the note's words found there (same stem, same meaning, or another form of the same root): [[start, end), ...] in `text`, for showing WHY a passage was suggested. */
@@ -303,9 +330,20 @@ export async function findMatches(notes, passages, { floor = 0.3, yieldMs = 8 } 
     }
     if (!scored.length) continue;
     scored.sort((x, y) => y.score - x.score || (passages[x.i].e - passages[x.i].s) - (passages[y.i].e - passages[y.i].s));
-    const best = scored[0], bp = passages[best.i];
+    // Passages never cross a paragraph (passagesOf), so the question is WHICH PARAGRAPH the note is about: each candidate paragraph is ranked by its best passage and by how much
+    // of the note the whole paragraph holds. The runner-up that decides whether the answer is clear is the best passage of ANOTHER paragraph (two good sentences of the same
+    // paragraph are one place, not a doubt).
+    const paras = passages.paragraphs; let best = scored[0], cover = 1;
+    if (paras) {
+      const per = new Map(); for (const x of scored) { const k = passages[x.i].para; if (!per.has(k)) per.set(k, x); if (per.size >= 6) break; }
+      let top = null, rank = -1;
+      for (const [k, x] of per) { const cv = Math.min(1, credit(A, indexed(vec(paras[k].toks))).sw / A.tot), r = x.score + 0.1 * cv; if (r > rank) { rank = r; top = x; cover = cv; } }
+      best = top;
+    }
+    const bp = passages[best.i];
     if (best.score < floor) continue;
-    const other = scored.find((x) => passages[x.i].e <= bp.s || passages[x.i].s >= bp.e);      // the best passage that does not overlap the winner
+    if (paras && cover < PARA_COVER_MIN) continue;                              // the paragraph holds too little of the note: no link is better than a misleading one
+    const other = paras ? scored.find((x) => passages[x.i].para !== bp.para) : scored.find((x) => passages[x.i].e <= bp.s || passages[x.i].s >= bp.e);
     const second = other ? other.score : 0;
     if (best.score - second < 0.06) continue;                                   // ambiguous: it fits several places about equally (even a perfect score), so none of them is "the" place
     // the winner is a window of up to 3 sentences: narrow it to the part that is actually about the note (the score and the evidence then describe what is shown)

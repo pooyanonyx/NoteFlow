@@ -41,3 +41,21 @@ export function placeInPage(d, rect, g) {
   if (d.y1 <= d.y2) { o.y1 = y; o.y2 = r2(y + h); } else { o.y2 = y; o.y1 = r2(y + h); }
   return o;
 }
+
+/** Union [x1, y1, x2, y2] of boxes (null for none). */
+export function unionRect(boxes) {
+  let u = null;
+  for (const b of boxes) { if (!b) continue; u = u ? [Math.min(u[0], b[0]), Math.min(u[1], b[1]), Math.max(u[2], b[2]), Math.max(u[3], b[3])] : b.slice(); }
+  return u;
+}
+
+/**
+ * Where the top-left corner of a dragged group (document-space rectangle `rect`) goes on the page with geometry g = [x, y, w, h], in that page's own coordinates:
+ * where it was dropped, but kept inside the page (a group larger than the page is kept covering it instead, so it can still be grabbed).
+ * The caller moves every item by (result - the group's old top-left), so the relative positions inside the group never change.
+ */
+export function placeGroup(rect, g) {
+  const w = rect[2] - rect[0], h = rect[3] - rect[1];
+  const fit = (v, size, dim) => clamp(v, Math.min(0, dim - size), Math.max(0, dim - size));
+  return [r2(fit(rect[0] - g[0], w, g[2])), r2(fit(rect[1] - g[1], h, g[3]))];
+}

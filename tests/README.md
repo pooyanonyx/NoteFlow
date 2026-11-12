@@ -27,7 +27,7 @@ node --test "tests/unit/*.test.mjs"
 | `test_tools_paper.py` | Reset to default per tool, independent tool settings, paper types and settings, right-to-left notebooks |
 | `test_perf.py` | large notebooks: page bitmap cache, bounded memory, incremental autosave |
 | `test_regress.py` | notes, mind maps, boards, PDFs, drawing / moving / erasing, keyboard isolation |
-| `test_save.py` | saving in place into a chosen file (with a stand-in for the file picker), the save indicator, failed saves, download fallback, older `.dnws` files never overwritten, automatic file saving, a failing / damaged backup, the global error notice, moving the old `dualnote` database |
+| `test_save.py` | the backup on this device: the Saved / Unsaved / Backup failed indicator, Ctrl+S (never a download or a picker), Auto-Save (on by default, off, switching), rapid changes, storage kept small, recovery after refresh and restart, failing, interrupted (atomic) and damaged backups with the fallback to the previous one, Export as a separate act, moving the old `dualnote` database, the global error notice |
 | `test_selection.py` | marquee / Shift+click / Ctrl+A, group move / delete / duplicate (one undo step), copy / cut / paste (also to another panel), links not shared with copies, mind-map copies, touch still scrolls, pen pressure |
 | `test_sources.py`, `test_pdfnav.py` | the Sources panel (follows the page, backlinks, Quote a passage) and the Pages / Outline tabs (thumbnails with bounded memory, outline, bookmarks saved in the workspace) |
 | `test_pdf_export.py` | real PDF annotations on export, read back and drawn by pdf.js; rotated pages; the exported file reopens with every item unchanged |

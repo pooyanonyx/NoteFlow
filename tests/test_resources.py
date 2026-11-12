@@ -12,7 +12,7 @@ with sync_playwright() as pw:
     # ------------------------------------------------ idle
     P("""() => { window.__renders = 0; window.__long = []; for (const p of Object.values(noteflow.panels)) { const o = p.render.bind(p); p.render = (...x) => { window.__renders++; return o(...x); }; }
         window.__ints = new Set(); const si = window.setInterval.bind(window), ci = window.clearInterval.bind(window); window.setInterval = (f, d, ...r) => { const id = si(f, d, ...r); window.__ints.add(id); return id; }; window.clearInterval = (id) => { window.__ints.delete(id); return ci(id); };
-        window.__writes = 0; const o2 = noteflow.idb.set.bind(noteflow.idb); noteflow.idb.set = (...x) => { window.__writes++; return o2(...x); };
+        window.__writes = 0; const o2 = noteflow.idb.batch.bind(noteflow.idb); noteflow.idb.batch = (...x) => { window.__writes++; return o2(...x); };
         try { new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__long.push(e.duration); }).observe({ entryTypes: ['longtask'] }); } catch (e) {} }""")
     a.page.wait_for_timeout(4000)                                    # (the one-off snapshot of the session after start is written in this time)
     P("() => { window.__renders = 0; window.__writes = 0; window.__long.length = 0; }"); a.page.wait_for_timeout(4000)

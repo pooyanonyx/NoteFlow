@@ -20,6 +20,7 @@ export function el(tag, props = {}, ...kids) {
 
 const P = (d) => `<path d="${d}"/>`;
 const ICONS = {
+  export: P("M12 15V4") + P("M8 8l4-4 4 4") + P("M5 15v5h14v-5"),
   gear: P("M4 7h9") + P("M17 7h3") + P("M15 5a2 2 0 100 4 2 2 0 000-4z") + P("M4 17h3") + P("M11 17h9") + P("M9 15a2 2 0 100 4 2 2 0 000-4z"),
   thumbs: P("M4 4h7v7H4z") + P("M13 4h7v7h-7z") + P("M4 13h7v7H4z") + P("M13 13h7v7h-7z"),
   bookmark: P("M7 4h10v16l-5-4-5 4z"),

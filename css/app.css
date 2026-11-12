@@ -346,3 +346,21 @@ select.paper { max-width:150px; }
 button:focus-visible, select:focus-visible, input:focus-visible, [role="tab"]:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .topbar button:focus-visible { outline-color:#fff; }
 .stage:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+
+/* Sources: one card for every link */
+.srcscope { display:flex; gap:4px; } .srcscope .btn { flex:1 1 0; justify-content:center; padding-inline:4px; } .srcscope .btn.on { background:var(--accent-bg); color:var(--accent-ink); border-color:var(--accent); }
+.srcsugg { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border-radius:8px; background:var(--violet-bg); border:1px solid var(--violet-line); font-size:12px; color:var(--violet-ink); }
+.srchint { margin:0 0 4px; font-size:12px; color:var(--muted); }
+.card { display:flex; flex-direction:column; gap:6px; padding:9px 10px; margin-bottom:8px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.card.broken { border-color:var(--danger); }
+.cardsrc, .cardnote { display:flex; gap:8px; align-items:flex-start; } .cardsrc .ic, .cardnote .ic { width:16px; height:16px; flex:none; margin-top:2px; }
+.cardsrc .ic { color:#c62828; } .cardnote .ic { color:var(--accent); }
+.cardtxt { display:flex; flex-direction:column; min-width:0; flex:1 1 auto; } .cardlabel { font-size:10px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); font-weight:700; }
+.cardsrc b { font-size:13px; overflow-wrap:anywhere; } .cardtext { font-size:13px; line-height:1.35; overflow-wrap:anywhere; } .cardwhere { font-size:11px; color:var(--muted); }
+.tag { flex:none; font-size:10px; font-weight:700; padding:2px 7px; border-radius:999px; background:var(--surface-2); color:var(--ink-2); border:1px solid var(--line-2); }
+.tag.text { background:var(--violet-tag); color:var(--violet-ink); border-color:var(--violet-line); } .tag.region { background:var(--teal-bg); color:var(--teal-ink); }
+.cardquote { margin:0 0 0 24px; padding:2px 0 2px 8px; border-inline-start:3px solid var(--violet-line); font-size:12.5px; line-height:1.4; font-style:italic; color:var(--ink-2); overflow-wrap:anywhere; }
+.cardbad { font-size:12px; color:var(--danger); font-weight:600; }
+.cardact { display:flex; flex-wrap:wrap; gap:6px; margin-top:2px; } .cardact .quiet { margin-inline-start:auto; color:var(--muted); }
+.srcplain { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 0; font-size:12.5px; } .srcplaintxt { min-width:0; overflow-wrap:anywhere; }
+.btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); } .btn.primary:hover { filter:brightness(1.08); }

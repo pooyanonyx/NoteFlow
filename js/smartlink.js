@@ -158,7 +158,7 @@ export class SmartLink {
   makeSuggestion(A, B, r) {
     const n = r.note, text = n.text, pass = r.passage;
     let target, targetKey, targetText;
-    if (B.kind === "pdf") { target = { kind: "pdf", panel: B.panel, page: B.page, s: pass.s, e: pass.e }; targetKey = `pdf:${B.panel.pdf.hash.slice(0, 12)}:${B.page}:${pass.s}`; targetText = B.text.slice(pass.s, pass.e); }
+    if (B.kind === "pdf") { target = { kind: "pdf", panel: B.panel, page: B.page, s: pass.s, e: pass.e }; targetText = B.text.slice(pass.s, pass.e); targetKey = `pdf:${B.panel.pdf.hash.slice(0, 12)}:${B.page}:${hash(normalize(targetText).slice(0, 60))}`; }          // (the key follows the passage's WORDS, not its offset in the extracted text, so a better text extraction does not bring dismissed suggestions back)
     else { target = { kind: "item", panel: B.panel, page: B.page, item: pass.item }; const itext = String(pass.item.text).slice(0, MAX_ITEM_TEXT).slice(pass.s, pass.e); targetKey = `item:${hash(normalize(itext).slice(0, 80))}`; targetText = itext; }          // (the narrowed range of the item, not the whole block)
     const key = `${hash(normalize(text).slice(0, 120))}|${targetKey}`;
     if (this.store.isRejected(key) || this.snoozed.has(key)) return null;
@@ -232,6 +232,8 @@ export class SmartLink {
     finally { sg.busy = false; }
   }
   reject(sg) { if (sg.done) return; sg.done = true; this.store.reject(sg.key); this.drop(sg); this.app.scheduleAutosave(); }
+  /** Bring the card of suggestions back after it was closed with "Not now". */
+  showCard() { this.snoozed.clear(); this.draw(); }
   /** The time of a suggestion ran out without an answer: exactly "Not related" (remembered, not offered again), and never a link. */
   expire(sg) { if (sg.done || sg.busy) return; if (sg === this.report) this.dismissReport(sg); else this.reject(sg); }
   /** What is being counted down now: the suggestions on screen, or, when there are none, the notice (the result of "Check now": no match found, or what was linked on its own). */

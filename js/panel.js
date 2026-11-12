@@ -9,6 +9,7 @@ import * as T from "./tools.js";
 import * as RT from "./richtext.js";
 import * as F from "./flow.js";
 import * as PM from "./pagemove.js";
+import { transferItems, chainsOf, detachChains } from "./transfer.js";
 import { RichEditor } from "./editor.js";
 import { sha256Hex } from "./workspace.js";
 import { PdfTextStore } from "./pdftext.js";
@@ -799,7 +800,7 @@ export class Panel {
     this.syncVp();
     const v = this.view, s = v.scale, [lo, hi] = this.visibleRange();
     this.linkHits = [];
-    const act = this.action, flo = act && act.type === "move" && act.moved && act.float ? act : null;      // an image that is being dragged
+    const act = this.action, flo = act && (act.type === "move" || act.type === "gmove") && act.moved && act.float ? act : null;      // items being dragged (they may leave their page)
     ctx.save();
     ctx.translate(v.tx, v.ty); ctx.scale(s, s);
     for (let i = lo; i <= hi; i++) {
@@ -840,9 +841,12 @@ export class Panel {
       if (isCur) { const gi = this.action && this.action.type === "gmove" ? this.action.idxs : this.groupIdx(); if (gi.length) this.drawGroupSelection(ctx, list, gi); if (this.action && this.action.type === "marquee") this.drawMarquee(ctx); }
       ctx.restore();
     }
-    if (flo && this.live && this.live[flo.idx]) {
-      const g = this.pageGeom(this.cur), t = this.pageGeom(flo.dest === undefined ? this.cur : flo.dest);
-      ctx.save(); ctx.translate(g[0], g[1]); R.drawItem(ctx, this.live[flo.idx], {}); this.drawSelection(ctx, this.live[flo.idx]); ctx.restore();
+    if (flo && this.live) {
+      const g = this.pageGeom(this.cur), t = this.pageGeom(flo.dest === undefined ? this.cur : flo.dest), fi = (flo.idxs || [flo.idx]).filter((i) => this.live[i]);
+      ctx.save(); ctx.translate(g[0], g[1]);
+      for (const i of fi) R.drawItem(ctx, this.live[i], {});
+      if (fi.length === 1) this.drawSelection(ctx, this.live[fi[0]]); else if (fi.length) this.drawGroupSelection(ctx, this.live, fi);
+      ctx.restore();
       if (flo.dest !== undefined && flo.dest !== this.cur) {                              // the page it would land on is outlined
         ctx.save(); ctx.strokeStyle = "#1976d2"; ctx.lineWidth = 3 / s; ctx.setLineDash([8 / s, 5 / s]); ctx.strokeRect(t[0], t[1], t[2], t[3]); ctx.restore();
       }
@@ -1215,10 +1219,7 @@ export class Panel {
     if (a.type === "gmove") {
       if (!a.moved && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 4) a.moved = true;
       if (!a.moved) return;
-      const [pw, ph] = this.pageDims(), [dx, dy] = S.clampDelta(a.box, p.x - a.p0.x, p.y - a.p0.y, pw, ph);
-      a.dx = dx; a.dy = dy; this.live = this.items.slice();
-      a.idxs.forEach((i, k) => { this.live[i] = this.settle(M.translate(a.origs[k], dx, dy)); });
-      this.render(); return;
+      a.e = e; this.groupDragMove(a, e); return;
     }
     if (a.type === "marquee") {
       a.p1 = p; a.hits = S.itemsInRect(this.items, [a.p0.x, a.p0.y, p.x, p.y], (d) => (d.t === "conn" ? null : this.boundsOf(d)));
@@ -1277,16 +1278,13 @@ export class Panel {
       const live = this.live; this.live = null;
       if (a.moved && live) {
         const dx = p.x - a.p0.x, dy = p.y - a.p0.y;
-        if (Math.hypot(dx, dy) >= 0.5) { if (a.float) this.dropImage(a, live[a.idx]); else this.commit(live, { keepSel: true, flowIdx: a.idx }); return; }
+        if (Math.hypot(dx, dy) >= 0.5) { if (a.float) this.dropItems(a, [a.idx], live); else this.commit(live, { keepSel: true, flowIdx: a.idx }); return; }
       }
       this.render(); this.tapSelect(a.idx, l); return;
     }
     if (a.type === "gmove") {
       const live = this.live; this.live = null;
-      if (a.moved && live && (Math.abs(a.dx) >= 0.5 || Math.abs(a.dy) >= 0.5)) {
-        this.commit(live, { keepSel: true });
-        this.group = new Set(a.idxs.map((i) => this.items[i])); this.ui(); this.render(); return;       // (one undo step for the whole move; the moved items stay selected)
-      }
+      if (a.moved && live && (Math.abs(a.dx) >= 0.5 || Math.abs(a.dy) >= 0.5)) { this.dropItems(a, a.idxs, live); return; }          // (one undo step for the whole move; the moved items stay selected)
       this.render(); if (!a.moved) { const h = this.hit(p); this.setSelection(h !== null ? [h] : []); }                  // (a click on a member of the group, without dragging: that item alone)
       return;
     }
@@ -1307,20 +1305,32 @@ export class Panel {
   // ---- dragging an image to another page (geometry: pagemove.js)
   /** [x, y, w, h] of page i in document space (the column of pages). */
   pageGeom(i) { const [w, h] = this.sizeOf(i); return [(this.docW - w) / 2, this.offs[i], w, h]; }
-  /** Where the (dragged) image d of the active page would land: the page it covers most, and its rectangle in document space. */
-  imageDrop(d) {
-    const [ox, oy] = this.origin(), rect = PM.docRect(d, ox, oy);
+  /** Can items be dragged to another page? (a PDF or a notebook with more than one page) */
+  crossPage() { return this.kind !== "board" && this.pages.length > 1 && this.continuous() && !!this.offs; }
+  /** Where the dragged items (of the active page) would land: the page that their common rectangle covers most, and that rectangle in document space. */
+  itemsDrop(list) {
+    const [ox, oy] = this.origin(), u = PM.unionRect(list.map((d) => this.boundsOf(d))) || [0, 0, 0, 0], rect = [u[0] + ox, u[1] + oy, u[2] + ox, u[3] + oy];
     const page = PM.dropPage(rect, { count: this.pages.length, geom: (i) => this.pageGeom(i), pageAt: (y) => this.pageAt(y), pageNearest: (y) => this.pageNearest(y), prefer: this.cur });
-    return { rect, page };
+    return { rect, page, bounds: u };
   }
-  /** One step of dragging an item with Select. An image is not clipped to its page while it is dragged (it is drawn over the pages, see drawDoc) and knows which page it is over. */
+  /** One step of dragging a single item with Select. With more than one page the item is not clipped to its page while it is dragged (it is drawn over the pages, see drawDoc)
+   *  and knows which page it is over. */
   dragMove(a, e) {
     const p = this.toPage(e), moved = this.settle(M.translate(a.orig, p.x - a.p0.x, p.y - a.p0.y));
     this.live = this.items.slice(); this.live[a.idx] = moved;
-    if (moved.t === "image") { a.float = true; a.dest = this.imageDrop(moved).page; this.edgeScroll(a); }
+    if (this.crossPage()) { a.float = true; a.dest = this.itemsDrop([moved]).page; this.edgeScroll(a); }
     this.render();
   }
-  /** While an image is dragged near the top / bottom edge of the panel the pages scroll, so a page that is out of view can be reached at any zoom level. */
+  /** One step of dragging a group: every member moves by the same distance (relative positions stay). Within one page the group is kept on the page; with more pages it floats. */
+  groupDragMove(a, e) {
+    const p = this.toPage(e), cross = this.crossPage(), [pw, ph] = this.pageDims();
+    const [dx, dy] = cross ? [p.x - a.p0.x, p.y - a.p0.y] : S.clampDelta(a.box, p.x - a.p0.x, p.y - a.p0.y, pw, ph);
+    a.dx = dx; a.dy = dy; this.live = this.items.slice();
+    a.idxs.forEach((i, k) => { this.live[i] = this.settle(M.translate(a.origs[k], dx, dy)); });
+    if (cross) { a.float = true; a.dest = this.itemsDrop(a.idxs.map((i) => this.live[i])).page; this.edgeScroll(a); }
+    this.render();
+  }
+  /** While items are dragged near the top / bottom edge of the panel the pages scroll, so a page that is out of view can be reached at any zoom level. */
   edgeScroll(a) {
     if (a.timer) return;
     a.timer = setInterval(() => {
@@ -1330,21 +1340,36 @@ export class Panel {
       if (!k) return;
       const before = this.view.ty;
       this.scrollViewBy(0, clamp(k, -1, 1) * 16);
-      if (this.view.ty !== before) this.dragMove(a, a.e);               // (the pointer stays where it is, the page under it changed)
+      if (this.view.ty !== before) { if (a.type === "gmove") this.groupDragMove(a, a.e); else this.dragMove(a, a.e); }       // (the pointer stays where it is, the page under it changed)
     }, 16);
   }
-  /** The drop of a dragged image: it goes to the page it covers most (the page it came from when that is the one), is kept inside that page with its size, aspect ratio and picture
-   *  untouched, stays selected, and the whole move is ONE undo step. Both pages change before anything is told about it, so a link to the image survives. */
-  dropImage(a, d) {
-    const { rect, page } = this.imageDrop(d), src = this.cur, placed = PM.placeInPage(d, rect, this.pageGeom(page));
-    if (page === src) { const items = this.items.slice(); items[a.idx] = placed; this.commit(items, { keepSel: true }); return; }
+  /** The drop of dragged items (one or a group): they go to the page their rectangle covers most (the page they came from when that is the one). On the same page a single item
+   *  is simply moved; a group or a picture is also kept inside the page. On another page every item keeps its properties and all keep their positions relative to each other, the
+   *  group is kept inside the page, and the items stay selected there. The whole move is ONE undo step; both pages change before anything is told about it, so links to the
+   *  items survive (they follow the item id). Connectors that would point across pages are dropped, a chain of continued text is detached (see transfer.js). */
+  dropItems(a, idxs, live) {
+    const items = idxs.map((i) => live[i]), { rect, page, bounds } = this.itemsDrop(items), src = this.cur;
+    const [px, py] = PM.placeGroup(rect, this.pageGeom(page)), sx = px - bounds[0], sy = py - bounds[1];
+    if (page === src) {
+      if (idxs.length === 1 && items[0].t !== "image") { this.commit(live, { keepSel: true, flowIdx: idxs[0] }); return; }        // (as before: a single item moved on its page)
+      const out = this.items.slice(); idxs.forEach((i, k) => { out[i] = this.settle(M.translate(items[k], sx, sy)); });
+      this.commit(out, { keepSel: true });
+      if (idxs.length > 1) this.group = new Set(idxs.map((i) => this.items[i]));
+      this.ui(); this.render(); return;
+    }
+    const moved = transferItems(live, idxs, sx, sy), chains = chainsOf(idxs.map((i) => live[i]));     // (live holds the dragged items; the shift puts them on the new page)
     this.history.push(this.snap(), src);
-    const from = this.items.slice(); from.splice(a.idx, 1);
-    const to = [...this.pages[page].items, placed];
-    this.pages[src].items = from; this.pages[page].items = to;
-    this.live = null; this.preview = null;
-    this.setCur(page); this.selected = to.length - 1;
-    this.dirty = true; this.app.onChange(this); this.ui(); this.render();
+    for (let i = 0; i < this.pages.length; i++) if (i !== src) this.pages[i].items = detachChains(this.pages[i].items, chains);     // (the rest of a continued text lives on other pages too)
+    this.pages[src].items = moved.rest;
+    const base = this.pages[page].items.length;
+    this.pages[page].items = [...this.pages[page].items, ...moved.moved];
+    this.live = null; this.preview = null; this.group = null;
+    this.setCur(page);
+    this.pages[page].items = [...this.pages[page].items.slice(0, base), ...moved.moved.map((d) => this.adaptToPage(d))];
+    const sel = []; moved.moved.forEach((d, k) => { if (d.t !== "conn") sel.push(base + k); });
+    this.dirty = true; this.app.onChange(this);
+    this.setSelection(sel.length ? sel : [base]);
+    if (moved.dropped.length || moved.detached) toast(`${moved.dropped.length ? moved.dropped.length + " connector" + (moved.dropped.length === 1 ? "" : "s") + " to items that stayed behind removed. " : ""}${moved.detached ? "Continued text on this move is now separate text boxes." : ""}`.trim(), 4200);
     this.tapSelect(null, null);
   }
   deleteSelected() {

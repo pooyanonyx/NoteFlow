@@ -144,11 +144,11 @@ The toolbars float on top of your work, so opening and closing them never makes 
 
 ## Your work stays yours
 
-- **Save workspace** puts your PDF, annotations, notebooks and boards into **one file** (`.nfws`), so you can close everything and continue later. In Chrome, Edge and other Chromium browsers the first save asks where; every later save (`Ctrl+S`) **overwrites that same file**. `Ctrl+Alt+S` saves under a new name. Elsewhere, Save downloads a copy.
-- **A save indicator** next to Save says whether your work is in a file (*Saved*, *Unsaved changes*, *Not saved to a file*) and warns in red if it could not be saved or backed up.
-- **Automatic backup.** NoteFlow also keeps your session on your device, so an accidental refresh does not lose your work. If a backup cannot be read, it is **kept, not overwritten**, until you decide what to do.
+- **Your work saves itself.** With **Auto-Save Workspace** (Settings, on by default) every change is backed up **on this device** a moment after you make it, so closing the tab, refreshing or restarting never loses your work, and the workspace (PDFs, notebooks, boards, links) is back when you reopen NoteFlow. `Ctrl+S` (or the Save button) backs up right away; it never downloads a file or asks where to save. With Auto-Save off, only `Ctrl+S` saves, and closing with unsaved changes asks first.
+- **A save indicator** next to Save describes that backup: **Saved** (the latest state is backed up), **Unsaved** (changes not backed up yet), **Backup failed** (red, with the reason; click to retry). A backup is written in one all-or-nothing step and read back to check it, and the one before it is kept: if the newest were ever damaged, the previous one is restored automatically. A backup that cannot be read is **kept, not overwritten**, until you decide.
+- **Export a file** (the Export button, `Ctrl+Shift+E`) makes a portable `.nfws` copy of the whole workspace on your computer: to move it to another device or keep an archive. Exporting is separate from saving and does not change the Saved mark.
 - **Export** to PDF from the PDF panel, the notebook and the board. Pen strokes, marker strokes and text highlights are written as **real PDF annotations** (visible in any PDF viewer); text, shapes and images are drawn on the page, and your editable NoteFlow data travels inside the file.
-- **Older files keep working.** Workspaces, notebooks, boards and annotated PDFs saved before NoteFlow was renamed (`.dnws`, `.dnote`, `.dnboard`) open as before; they are saved in the new format (`.nfws`, `.nfnote`, `.nfboard`) under a new name, and the original is never overwritten. Your automatic backup moves over by itself.
+- **Older files keep working.** Workspaces, notebooks, boards and annotated PDFs saved before NoteFlow was renamed (`.dnws`, `.dnote`, `.dnboard`) open as before; when exported they are written in the new format (`.nfws`, `.nfnote`, `.nfboard`) and your original file is never overwritten. Your automatic backup moves over by itself.
 - **Private by design.** NoteFlow runs in your browser. Your documents are not uploaded anywhere.
 
 ---
@@ -184,7 +184,7 @@ Single keys switch tools while you are not typing, so letters and spaces always 
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo (`⌘` on a Mac) |
 | `+` / `-` / `0` | Zoom in / out / fit |
 | `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` / `Ctrl+D` | Select all / copy / cut / paste / duplicate items |
-| `Ctrl+S` / `Ctrl+Alt+S` | Save workspace / save under a new name |
+| `Ctrl+S` / `Ctrl+Shift+E` | Save on this device now / export a workspace file |
 | `Tab` / `Enter` | Mind map: add a child / add a sibling |
 
 Press `?` any time to see the full list.
@@ -197,7 +197,7 @@ Press `?` any time to see the full list.
 2. **Drop a PDF** onto the page, or press **Open**.
 3. **Highlight** a passage, then switch to the **Notebook** side and write what it means in your own words.
 4. Open the **Mind map** menu and sketch how the ideas connect.
-5. Press **Save workspace** to keep everything together.
+5. That is all: NoteFlow saves as you work. Press **Export** only when you want a file to keep or move.
 
 ---
 
@@ -241,7 +241,7 @@ NoteFlow has no build step: it is plain ES modules served as static files (`pyth
 | Toolbar, editing, pages, page-bitmap cache | `js/panel.js` |
 | Several items selected, copy / paste / duplicate (the panel methods) | `js/panelselection.js` |
 | Selection rectangles, copies, the copy buffer (pure) | `js/selection.js` |
-| Saving into a chosen file (File System Access API) | `js/savefile.js` |
+| Exporting a workspace as a file (File System Access API) | `js/savefile.js` |
 | Uncaught-error log (local only) | `js/diagnostics.js` |
 | App preferences (theme, pen pressure, memory saver…) and the Settings dialog | `js/prefs.js`, `js/settingsui.js` |
 | Side panel: Sources, Pages (thumbnails), Outline; its data | `js/sourcesui.js`, `js/sourcesmodel.js`, `js/pdfnav.js`, `js/bookmarks.js` |

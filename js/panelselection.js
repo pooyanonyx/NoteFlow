@@ -77,12 +77,17 @@ export const selectionMethods = {
   hasSelection() { return this.selectionIdx().length > 0 && !this.editing; },
 
   /** Put copies into this page (shifted by step), select them, one undo step. */
+  /** An item as it must be on the CURRENT page: text that is ruled (sits on the lines of lined paper) is put on the lines, or made free text on a page without lines. */
+  adaptToPage(d) {
+    if (d.t === "text" && d.ruled && !["lined", "cornell"].includes(this.pages[this.cur] && this.pages[this.cur].paper)) { const n = { ...d }; delete n.ruled; delete n.rp; return n; }
+    return this.settle(d);
+  },
   pasteItems(items, step = 16) {
     if (!items || !items.length || !this.hasPage) return false;
     this.finishEdit();
     const [pw, ph] = this.pageDims(), box = S.unionBounds(items.filter((d) => d.t !== "conn").map((d) => R.itemBounds(d, null)));
     const [dx, dy] = box ? S.clampDelta(box, step, step, pw, ph) : [step, step];
-    const copies = S.cloneItems(items, dx, dy).map((d) => { if (d.t === "text" && d.ruled && !["lined", "cornell"].includes(this.pages[this.cur] && this.pages[this.cur].paper)) { const n = { ...d }; delete n.ruled; delete n.rp; return n; } return this.settle(d); });      // (ruled text only on ruled paper)
+    const copies = S.cloneItems(items, dx, dy).map((d) => this.adaptToPage(d));
     const base = this.items.length;
     this.commit([...this.items, ...copies], { keepSel: false });
     const idx = copies.map((_, k) => base + k).filter((i) => this.items[i] && this.items[i].t !== "conn");

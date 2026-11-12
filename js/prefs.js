@@ -7,7 +7,7 @@ export const DEFAULTS = Object.freeze({
   theme: "system",          // "system" | "light" | "dark": the colours of the application (paper keeps its own colour)
   motion: "system",         // "system" | "reduce": animations of the interface
   pressure: true,           // pen pressure changes the width of a stroke (when the stylus reports it)
-  autoSaveFile: false,      // also write changes into the workspace file (when one was chosen) after a pause
+  autoSave: true,           // back up every change on this device automatically (Ctrl+S always backs up right away, with or without this)
   memorySaver: false,       // smaller page cache and lower rendering resolution: for modest hardware
 });
 
@@ -15,7 +15,7 @@ const CHECK = {
   theme: (v) => ["system", "light", "dark"].includes(v),
   motion: (v) => ["system", "reduce"].includes(v),
   pressure: (v) => typeof v === "boolean",
-  autoSaveFile: (v) => typeof v === "boolean",
+  autoSave: (v) => typeof v === "boolean",
   memorySaver: (v) => typeof v === "boolean",
 };
 
