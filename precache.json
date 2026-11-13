@@ -42,6 +42,7 @@
 "js/textnorm.js",
 "js/tips.js",
 "js/tools.js",
+"js/toolsync.js",
 "js/transfer.js",
 "js/ui.js",
 "js/workspace.js",

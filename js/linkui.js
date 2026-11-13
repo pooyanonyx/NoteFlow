@@ -7,7 +7,7 @@
 import * as M from "./model.js";
 import * as R from "./render.js";
 import { LinkStore, anchorKey, anchorShape, sameAnchor } from "./links.js";
-import { pageTextData, rectsForRange } from "./pdftext.js";
+import { pageTextData, rectsForRange, caretAt, quoteText } from "./pdftext.js";
 import { el, toast, popup, closePopup, dialog, icon } from "./ui.js";
 import { MODES } from "./smartlink.js";
 
@@ -224,7 +224,7 @@ export class LinkController {
     const q = this.quoteTarget(); this.cancel(); if (!q) return;
     // Only what the reader selected goes into the note: no quotation marks, no file name, no page number. Where it came from is kept in the LINK (document identity, name, page,
     // the passage and its boxes): the note shows the link mark, the Sources panel lists it, and following it opens the PDF at the passage.
-    const text = String(anchor.quote.text).replace(/\s+/g, " ").trim(), rtl = /[\u0590-\u08FF]/.test(text);
+    const text = String(anchor.quote.text).trim(), rtl = /[\u0590-\u08FF]/.test(text);          // (exactly the selected text: its words, its order, its paragraphs)
     const [pw] = q.pageDims(), w = Math.min(Math.max(120, pw - 100), 420), page = q.kind === "board" ? 0 : q.cur, st = q.groups.text || q.curStyle;
     let d = { t: "text", x: rtl ? Math.max(20, pw - 50 - w) : 50, y: Math.max(20, q.belowBars(page) + 10), w, dir: rtl ? "rtl" : "ltr", align: rtl ? "right" : "left", text, color: st.color, size: Math.min(st.size || 18, 18), alpha: 255, bright: 0 };
     M.ensureId(d);
@@ -253,11 +253,6 @@ export class LinkController {
     if (panel.kind === "pdf" && panel.pdf) pageTextData(panel.pdf.doc, panel.cur).then((d) => { a.data = d; }).catch(() => {});
     return true;
   }
-  nearestWord(data, pt, tol = 3) {
-    let best = -1, bd = Infinity;
-    data.words.forEach((w, i) => { const dx = Math.max(w.x0 - pt.x, 0, pt.x - w.x1), dy = Math.max(w.y0 - pt.y, 0, pt.y - w.y1), d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; } });
-    return { i: best, d: Math.sqrt(bd), near: bd <= tol * tol };
-  }
   move(panel, e, l) {
     const a = panel.action;
     if (!a || a.type !== "pick") return;
@@ -267,14 +262,18 @@ export class LinkController {
     panel.pickPrev = g ? { page: a.page, rects: g.rects, kind: g.kind } : null;
     panel.render();
   }
-  /** What the drag from a.p0 to p selects on a PDF page: a passage of text (it started on a word) or a region. */
+  /** What the drag from a.p0 to p selects on a PDF page: a passage of text (it started on text) or a region. The passage is the range of the page's text (in reading order)
+   *  between the character under the start and the character under the pointer, so it is exactly what the drawn highlight covers. */
   gesture(panel, a, p) {
     if (panel.kind !== "pdf") return null;
-    const start = a.data && a.data.words.length ? this.nearestWord(a.data, a.p0, 4 / panel.view.scale + 2) : null;
-    if (start && start.near) {
-      const end = this.nearestWord(a.data, p), lo = Math.min(start.i, end.i), hi = Math.max(start.i, end.i);
-      const s = a.data.words[lo].start, t = a.data.words[hi].end;
-      return { kind: "text", rects: rectsForRange(a.data, s, t), text: clean(a.data.text.slice(s, t), 400) };
+    const start = a.data && a.data.words.length ? caretAt(a.data, a.p0, 4 / panel.view.scale + 2) : null;
+    if (start && start.hit) {
+      const end = caretAt(a.data, p), t = a.data.text;
+      let s = Math.min(start.off, end.off), e = Math.max(start.off, end.off);
+      while (s < e && /\s/.test(t[s])) s++;                                                                // (no white space at either end)
+      while (e > s && /\s/.test(t[e - 1])) e--;
+      const text = quoteText(a.data, s, e);
+      return { kind: "text", rects: rectsForRange(a.data, s, e), text, s, e };
     }
     const x0 = Math.min(a.p0.x, p.x), y0 = Math.min(a.p0.y, p.y), x1 = Math.max(a.p0.x, p.x), y1 = Math.max(a.p0.y, p.y);
     return { kind: "region", rects: [[x0, y0, x1, y1]], rect: [x0, y0, x1, y1] };
@@ -286,7 +285,7 @@ export class LinkController {
     let anchor = null;
     if (a.moved && panel.kind === "pdf") {
       const g = this.gesture(panel, a, p);
-      if (g && g.kind === "text" && g.text) anchor = this.pdfAnchor(panel, a.page, { quote: { text: g.text, rects: g.rects.slice(0, 40) } });
+      if (g && g.kind === "text" && g.text) anchor = this.pdfAnchor(panel, a.page, { quote: { text: g.text, rects: g.rects.slice(0, 200) } });
       else if (g && g.kind === "region" && g.rect[2] - g.rect[0] > 8 && g.rect[3] - g.rect[1] > 8) anchor = this.pdfAnchor(panel, a.page, { rect: g.rect });
     }
     if (!anchor) {                                                                        // a tap (or a drag too small to mean anything): the item under it, else the page

@@ -283,8 +283,11 @@ export class Panel {
     this.updateColorDot();
     if (tool === "hltext") this.ensureWords();
     if (!silent) this.render();
+    if (!temp) this.toolsChanged();
   }
   groupKey() { return GROUP_OF_TOOL[this.tool] || null; }
+  /** The tool or one of its settings was changed here: with "Sync Tools Across Panels" on, the other panels follow (toolsync.js copies only what changed). */
+  toolsChanged() { if (this.app.toolSync) this.app.toolSync.changed(this); }
   updateColorDot() { this.colorBtn.querySelector(".cdot").style.background = this.dotColor(); }
   /** The colour the Colour button shows: while a text box is typed, the colour of the text at the caret (or of what is typed next). */
   dotColor() {
@@ -306,13 +309,14 @@ export class Panel {
     this.rstateKey = ""; this.fmtKey = ""; this.updateColorDot(); this.updateFmtUi();
   }
   /** A Text tool setting (colour, size, opacity, brightness, thickness) chosen while typing: it becomes the tool's setting. */
-  setTextPref(key, value) { this.groups.text[key] = value; if (this.tool === "text") this.curStyle[key] = value; }
+  setTextPref(key, value) { this.groups.text[key] = value; if (this.tool === "text") this.curStyle[key] = value; this.toolsChanged(); }
 
   applyStyle(key, value, commit = true) {
     this.curStyle[key] = value;
     const g = this.groupKey();
     if (g) this.groups[g][key] = value;
     if (key === "color") this.updateColorDot();
+    this.toolsChanged();
     if (commit && this.tool === "select" && this.selected !== null) {
       const d = this.items[this.selected];
       if (!d) return;
@@ -335,6 +339,7 @@ export class Panel {
   }
   rememberColor(hex) {
     this.recent = [hex, ...this.recent.filter((c) => c !== hex)].slice(0, 10);
+    this.toolsChanged();
   }
   openColor() {
     const rich = this.richEditing();
@@ -429,7 +434,7 @@ export class Panel {
       this.editing.look = { alpha: this.groups[g].alpha, bright: this.groups[g].bright }; this.syncTyping(); this.syncLive();
     }
     if (this.brushBox) this.brushBox.update(this.brushStyle(), this.tool !== "hltext");
-    this.render();
+    this.render(); this.toolsChanged();
     toast(`${T.GROUP_LABEL[g]} reset to default.`);
     return true;
   }
@@ -830,7 +835,7 @@ export class Panel {
           R.drawItem(ctx, list[k], { ...o, skipText: !!ed && !ed.rich });          // (a text box being edited is drawn live like any other, so typing looks like the result)
         }
         if (isCur && this.preview) for (const p of [].concat(this.preview)) { if (this.editing && this.editing.rich && p.t === "text") this.drawEditBg(ctx, p); R.drawItem(ctx, p, o); }
-        if (isCur && this.linkTarget && o.nodes) { const n = o.nodes.get(this.linkTarget); if (n) { ctx.strokeStyle = "#1976d2"; ctx.lineWidth = 3; ctx.setLineDash([6, 4]); ctx.strokeRect(Math.min(n.x1, n.x2) - 5, Math.min(n.y1, n.y2) - 5, Math.abs(n.x2 - n.x1) + 10, Math.abs(n.y2 - n.y1) + 10); } }
+        if (isCur && this.linkTarget !== null && list[this.linkTarget]) { const n = this.geom(this.linkTarget, list); ctx.strokeStyle = "#1976d2"; ctx.lineWidth = 3; ctx.setLineDash([6, 4]); ctx.strokeRect(Math.min(n[0], n[2]) - 5, Math.min(n[1], n[3]) - 5, Math.abs(n[2] - n[0]) + 10, Math.abs(n[3] - n[1]) + 10); }
         ctx.restore();
       }
       this.drawMarks(ctx, i);
@@ -936,12 +941,13 @@ export class Panel {
   boundsOf(d) { let b = this._bc.get(d); if (!b) { b = R.itemBounds(d, null); this._bc.set(d, b); } return b; }     // (items are replaced, not edited in place, so this cache stays valid)
   /** id -> node for the connectors of this item list (cached per list; extra = items being previewed, e.g. a node still being typed). */
   nodeMapFor(list, extra = null) {
-    const ex = extra ? [].concat(extra) : [];
+    const ex = extra ? [].concat(extra) : [], a = this.action, src = a && a.type === "link" && a.src ? a.src : this.editing && this.editing.tag ? this.editing.tag.src : null;     // (src: the item a new connector is being dragged from, not yet an end)
+    if (src) ex.push(src);
     if (!(M.hasConns(list) || M.hasConns(ex))) return null;
     const c = this._nm;
-    if (c && c.list === list && c.extra === extra) return c.map;
-    const map = M.nodeIndex(list); for (const d of ex) if (d.t === "node" && d.id) map.set(d.id, d);
-    this._nm = { list, extra, map };
+    if (c && c.list === list && c.extra === extra && c.src === src) return c.map;
+    const map = R.mindIndex(list, ex);                                   // (any connected item is an end of a connector, not only nodes)
+    this._nm = { list, extra, src, map };
     return map;
   }
   selInfo(d, i) {
@@ -1009,6 +1015,13 @@ export class Panel {
     this.dirty = true;
     this.app.onChange(this);
     this.ui(); this.render();
+  }
+  /** Commit items that were just moved with the Selection tool: they come to the front, above everything else on the page (a group together, in its own order). It is the same undo step as
+   *  the move, and the order is part of the page, so it is saved and reopened with it. */
+  commitRaised(items, idxs) {
+    const r = M.raiseToFront(items, idxs), sel = this.selected;
+    this.groupRaised = r.idxs.map((i) => r.items[i]);
+    this.commit(r.items, { keepSel: true, select: sel !== null && r.map[sel] !== undefined ? r.map[sel] : idxs.length === 1 ? r.idxs[0] : null, flowIdx: idxs.length === 1 ? r.idxs[0] : null });
   }
   // ---- keyboard: temporary tool, panel-level shortcuts (the app routes keys here; typing in a field never reaches this code)
   beginTempTool(tool) {
@@ -1178,9 +1191,9 @@ export class Panel {
       else { this.selected = null; this.action = { type: "nodetap", p, l0: l, moved: false }; this.render(); }
       return;
     }
-    if (t === "link") {                                       // drag from a node; on empty space the finger scrolls
+    if (t === "link") {                                       // drag from any item (a node, an image, a text box, a shape, a drawing ...); on empty space the finger scrolls
       const idx = this.hit(p), d = idx !== null ? this.items[idx] : null;
-      if (d && d.t === "node") { this.selected = idx; this.action = { type: "link", from: d.id, l0: l }; this.render(); }
+      if (d && d.t !== "conn") { this.selected = idx; this.action = { type: "link", idx, from: M.mindId(d) || M.newMindId(), l0: l }; if (!M.mindId(d)) this.action.src = { ...d, mm: this.action.from }; this.render(); }      // (an item that is not an end yet gets its mind name only when the connection is made)
       else this.action = { type: "pan", last: l };
       return;
     }
@@ -1234,7 +1247,7 @@ export class Panel {
     if (a.type === "tap" && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 8) a.moved = true;
     if (a.type === "nodetap" && Math.hypot(l.x - a.l0.x, l.y - a.l0.y) > 8) { a.moved = true; this.preview = [this.dragNode(a.p, this.clampP(p))]; this.render(); }
     if (a.type === "link") {
-      const c = this.clampP(p), idx = this.hit(c), tn = idx !== null && this.items[idx].t === "node" && this.items[idx].id !== a.from ? this.items[idx].id : null;
+      const c = this.clampP(p), idx = this.hit(c), tn = idx !== null && idx !== a.idx && this.items[idx].t !== "conn" ? idx : null;
       this.linkTarget = tn; const st = this.curStyle;
       this.preview = [{ t: "conn", from: a.from, toPt: [c.x, c.y], style: this.connStyle, arrow: false, color: st.color, w: Math.max(1.5, st.width) }];
       this.render();
@@ -1278,7 +1291,7 @@ export class Panel {
       const live = this.live; this.live = null;
       if (a.moved && live) {
         const dx = p.x - a.p0.x, dy = p.y - a.p0.y;
-        if (Math.hypot(dx, dy) >= 0.5) { if (a.float) this.dropItems(a, [a.idx], live); else this.commit(live, { keepSel: true, flowIdx: a.idx }); return; }
+        if (Math.hypot(dx, dy) >= 0.5) { if (a.float) this.dropItems(a, [a.idx], live); else this.commitRaised(live, [a.idx]); return; }
       }
       this.render(); this.tapSelect(a.idx, l); return;
     }
@@ -1351,10 +1364,10 @@ export class Panel {
     const items = idxs.map((i) => live[i]), { rect, page, bounds } = this.itemsDrop(items), src = this.cur;
     const [px, py] = PM.placeGroup(rect, this.pageGeom(page)), sx = px - bounds[0], sy = py - bounds[1];
     if (page === src) {
-      if (idxs.length === 1 && items[0].t !== "image") { this.commit(live, { keepSel: true, flowIdx: idxs[0] }); return; }        // (as before: a single item moved on its page)
+      if (idxs.length === 1 && items[0].t !== "image") { this.commitRaised(live, idxs); return; }        // (as before: a single item moved on its page)
       const out = this.items.slice(); idxs.forEach((i, k) => { out[i] = this.settle(M.translate(items[k], sx, sy)); });
-      this.commit(out, { keepSel: true });
-      if (idxs.length > 1) this.group = new Set(idxs.map((i) => this.items[i]));
+      this.commitRaised(out, idxs);
+      if (idxs.length > 1) this.group = new Set(this.groupRaised);
       this.ui(); this.render(); return;
     }
     const moved = transferItems(live, idxs, sx, sy), chains = chainsOf(idxs.map((i) => live[i]));     // (live holds the dragged items; the shift puts them on the new page)
@@ -1529,7 +1542,7 @@ export class Panel {
     this.shapeKind = M.shapeKindInfo(id).id;
     this.updateShapeBtn();
     this.setTool("shape");
-    this.fillKey = ""; this.updateFillUi();
+    this.fillKey = ""; this.updateFillUi(); this.toolsChanged();
   }
   updateShapeBtn() {
     const k = M.shapeKindInfo(this.shapeKind);
@@ -1558,7 +1571,7 @@ export class Panel {
       const items = this.items.slice(); items[this.selected] = n; this.commit(items, { keepSel: true });
       this.fillOn = !!n.fill;
     } else if (this.fillEnabled()) this.fillOn = !this.fillOn;
-    this.fillKey = ""; this.updateFillUi(); this.render();
+    this.fillKey = ""; this.updateFillUi(); this.render(); this.toolsChanged();
   }
 
   // ------------------------------------------------------------------ board
@@ -1658,7 +1671,7 @@ export class Panel {
       title: desc, onclick: () => { closePopup(); this.setTool(tool); } }, icon(ic), el("span", { class: "mlab" }, label, el("small", {}, desc)), el("kbd", {}, K.TOOL_KEYS[tool]));
     popup(this.mindBtn, el("div", { class: "menu mindmenu", role: "menu" },
       row("node", "node", "Node", "Tap to add a node. Tab = child, Enter = sibling."),
-      row("link", "link", "Link", "Drag from one node to another to connect them."), el("div", { class: "msep" }), this.resetRow("node")));
+      row("link", "link", "Link", "Drag from any item (a node, an image, text, a shape, a drawing) to another to connect them."), el("div", { class: "msep" }), this.resetRow("node")));
   }
   buildMindGroup() {
     const mb = (ic, title, fn) => el("button", { class: "btn tool fmt", type: "button", title, "aria-label": title, "aria-pressed": "false", onclick: fn }, icon(ic));
@@ -1710,13 +1723,13 @@ export class Panel {
     if (d && d.t === "conn") { items = this.items.slice(); items[this.selected] = { ...d, ...patch }; }
     else if (d && d.t === "node") items = this.items.map((c) => (c.t === "conn" && (c.from === d.id || c.to === d.id) ? { ...c, ...patch } : c));
     if (items && JSON.stringify(items) !== JSON.stringify(this.items)) this.commit(items, { keepSel: true });
-    this.mindKey = ""; this.updateMindUi(); this.render();
+    this.mindKey = ""; this.updateMindUi(); this.render(); this.toolsChanged();
   }
   setNodeKind(k) {
     this.nodeKind = k;
     const d = this.selNode();
     if (d && d.kind !== k) { const items = this.items.slice(); items[this.selected] = { ...d, kind: k }; this.commit(items, { keepSel: true }); }
-    this.mindKey = ""; this.updateMindUi(); this.render();
+    this.mindKey = ""; this.updateMindUi(); this.render(); this.toolsChanged();
   }
   nodeProto(x1, y1, w = 120, h = 48) {
     const st = this.curStyle, f = this.fmt, r2 = (v) => Math.round(v * 100) / 100;
@@ -1770,7 +1783,7 @@ export class Panel {
       const z = stepSize(d.size, dir);
       if (z !== d.size) { const items = this.items.slice(); items[this.selected] = this.fitNode({ ...d, size: z }); this.commit(items, { keepSel: true }); }
     } else { const z = stepSize(this.curStyle.size, dir); this.curStyle = { ...this.curStyle, size: z }; const g = GROUP_OF_TOOL[this.tool]; if (g) this.groups[g] = { ...this.curStyle }; }
-    this.mindKey = ""; this.updateMindUi(); this.render();
+    this.mindKey = ""; this.updateMindUi(); this.render(); this.toolsChanged();
   }
   createNodeAt(p) { const n = this.nodeProto(p.x - 60, p.y - 24); this.startEdit(null, n, null); }
   revealBox(x1, y1, x2, y2) {                        // scroll just enough to see a box
@@ -1780,7 +1793,7 @@ export class Panel {
     if (T < m + 90) v.ty += m + 90 - T; else if (Bb > this.ch - m) v.ty -= Bb - (this.ch - m);          // (the toolbars float over the top edge)
     this.clampView(); this.render();
   }
-  childrenOf(id, items = this.items) { const nodes = M.nodeIndex(items); return items.filter((c) => c.t === "conn" && c.from === id).map((c) => nodes.get(c.to)).filter(Boolean); }
+  childrenOf(id, items = this.items) { const nodes = R.mindIndex(items); return items.filter((c) => c.t === "conn" && c.from === id).map((c) => nodes.get(c.to)).filter(Boolean); }
   /** New child below / beside the node: placed next to its existing children, connected, and ready for typing. */
   addChild(id = null) {
     const P = M.nodeIndex(this.items).get(id ?? this.selNode()?.id);
@@ -1810,19 +1823,26 @@ export class Panel {
     this.commit(this.items.filter((d) => !(d.t === "node" && ids.has(d.id))));
     if (ids.size > 1) toast(`Deleted ${ids.size} nodes (undo with Ctrl+Z).`);
   }
+  /** The connection of two items: the Link tool was dragged from item a.idx and released at c. Any two items can be connected (a node, an image, a text box, a shape, a drawing, any mix); an item
+   *  that was not an end of a mind map yet becomes one right here: it gets a mind name (`mm`) and keeps its content, look and behaviour. Nothing here touches the links of Smart Linking, PDF
+   *  sources or the Notebook (those use `id`). Released on empty space, a new node is made there and connected. */
   finishLink(a, c) {
     this.preview = null;
-    const tn = this.linkTarget; this.linkTarget = null;
-    const from = this.items.find((d) => d.t === "node" && d.id === a.from);
-    if (!from) { this.render(); return; }
-    if (tn) {
-      if (this.items.some((d) => d.t === "conn" && d.from === a.from && d.to === tn)) { toast("These nodes are already connected."); this.render(); return; }
-      this.commit([...this.items, this.connProto(a.from, tn)], { keepSel: true }); return;
+    const ti = this.linkTarget; this.linkTarget = null;
+    const from = this.items[a.idx];
+    if (!from || from.t === "conn") { this.render(); return; }
+    if (ti !== null && this.items[ti] && this.items[ti].t !== "conn" && ti !== a.idx) {
+      const items = this.items.slice(), mind = (i) => { const d = items[i]; if (!M.mindId(d)) items[i] = { ...d, mm: i === a.idx ? a.from : M.newMindId() }; return M.mindId(items[i]); };
+      const f = mind(a.idx), t = mind(ti);
+      if (items.some((d) => d.t === "conn" && ((d.from === f && d.to === t) || (d.from === t && d.to === f)))) { toast("These items are already connected."); this.render(); return; }
+      items.push(this.connProto(f, t)); this.commit(items, { keepSel: true }); return;
     }
-    const cx = (from.x1 + from.x2) / 2, cy = (from.y1 + from.y2) / 2;
-    if (Math.hypot(c.x - cx, c.y - cy) > 90 && !(from.x1 <= c.x && c.x <= from.x2 && from.y1 <= c.y && c.y <= from.y2)) {   // dropped on empty space: a new node there, linked
+    const b = this.geom(a.idx, this.items), cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    if (Math.hypot(c.x - cx, c.y - cy) > 90 && !(b[0] <= c.x && c.x <= b[2] && b[1] <= c.y && c.y <= b[3])) {   // dropped on empty space: a new node there, linked
       const n = this.nodeProto(c.x - 60, c.y - 24);
-      this.startEdit(null, n, [this.connProto(a.from, n.id)]);
+      const f = M.mindId(from) || a.from;
+      this.startEdit(null, n, [this.connProto(f, n.id)]);
+      if (!M.mindId(from)) this.editing.tag = { idx: a.idx, mm: f, src: { ...from, mm: f } };       // (the source becomes an end when the node is committed: one undo step, and nothing changes if the typing is cancelled)
     } else this.render();
   }
   /** Keys for the board: Tab = child, Enter = sibling, F2 = edit, Shift+Delete = delete branch. */
@@ -1894,7 +1914,7 @@ export class Panel {
       if (kind === "b" || kind === "i" || kind === "u") { const on = rs[kind] !== true; this.rt.setStyle({ [kind]: on }); this.textStyle[kind] = on; }
       else if (kind === "ul" || kind === "ol") { this.rt.setList(kind === "ul" ? "b" : "n"); this.rstateKey = ""; const L = this.richState().list; this.textStyle.list = L === "b" || L === "n" ? L : ""; }
       else { const z = step(rs.z ?? this.editedItem().size, kind === "bigger" ? 1 : -1); this.rt.setStyle({ z }); this.setTextPref("size", z); }
-      this.syncTyping(); this.rt.focus(); return;
+      this.syncTyping(); this.toolsChanged(); this.rt.focus(); return;
     }
     const d = this.textTarget();
     if (!d || d.t !== "text") {                          // no text box open or selected: these are the settings of the Text tool, used by the next box that is created
@@ -1916,7 +1936,7 @@ export class Panel {
     else if (kind === "ul") ts.list = ts.list === "b" ? "" : "b";
     else if (kind === "ol") ts.list = ts.list === "n" ? "" : "n";
     else if (size !== null && size !== this.curStyle.size) this.applyStyle("size", size, true);
-    this.fmtKey = ""; this.updateFmtUi(); this.render();
+    this.fmtKey = ""; this.updateFmtUi(); this.render(); this.toolsChanged();
   }
   setFmt(patch) {
     this.fmt = { ...this.fmt, ...patch };            // an explicit choice also becomes the default for new text
@@ -2183,7 +2203,8 @@ export class Panel {
         if (d.t === "node") {                                   // size the new node to its text; it stays selected (Tab / Enter continue the map)
           const fit = R.nodeFit(d, text, ed.domH || 0), w = d.g ? fit.w : Math.max(60, Math.abs(d.x2 - d.x1)), h = d.g ? fit.h : Math.max(Math.abs(d.y2 - d.y1), fit.h);
           d.x2 = Math.round((d.x1 + w) * 100) / 100; d.y2 = Math.round((d.y1 + h) * 100) / 100;
-          const at = this.items.length; this.commit([...this.items, d, ...(ed.extra || [])], { select: at });
+          const at = this.items.length; const tg = ed.tag, base = tg ? this.items.map((x, i) => (i === tg.idx && !M.mindId(x) ? { ...x, mm: tg.mm } : x)) : this.items;
+          this.commit([...base, d, ...(ed.extra || [])], { select: at });
         } else this.commit([...this.items, d]);
       } else { this.preview = null; this.render(); }
       return;

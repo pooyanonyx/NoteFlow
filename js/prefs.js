@@ -9,6 +9,7 @@ export const DEFAULTS = Object.freeze({
   pressure: true,           // pen pressure changes the width of a stroke (when the stylus reports it)
   autoSave: true,           // back up every change on this device automatically (Ctrl+S always backs up right away, with or without this)
   memorySaver: false,       // smaller page cache and lower rendering resolution: for modest hardware
+  syncTools: true,          // Sync Tools Across Panels: every panel uses the same active tool and the same tool settings (toolsync.js)
 });
 
 const CHECK = {
@@ -17,6 +18,7 @@ const CHECK = {
   pressure: (v) => typeof v === "boolean",
   autoSave: (v) => typeof v === "boolean",
   memorySaver: (v) => typeof v === "boolean",
+  syncTools: (v) => typeof v === "boolean",
 };
 
 let cache = null; const listeners = new Set();

@@ -17,7 +17,7 @@ const bare = (d) => { const o = { ...d }; for (const k of CHAIN) delete o[k]; re
  */
 export function transferItems(items, idxs, dx, dy) {
   const set = new Set(idxs), nodeIds = new Set();
-  for (const i of set) { const d = items[i]; if (d && d.t === "node" && d.id) nodeIds.add(d.id); }
+  for (const i of set) { const m = M.mindId(items[i]); if (m) nodeIds.add(m); }
   const moved = [], rest = [], dropped = []; const chains = new Set();
   items.forEach((d, i) => {
     const mine = set.has(i);

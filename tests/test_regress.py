@@ -27,7 +27,8 @@ with sync_playwright() as pw:
     tx, ty = a.screen_of(105, 125); a.page.mouse.click(tx, ty); a.page.wait_for_timeout(100)
     C.check("clicking a text box selects it", a.ev("() => noteflow.panels.nb.selected") == 0)
     a.page.mouse.move(tx, ty); a.page.mouse.down(); a.page.mouse.move(tx + 40, ty + 100, steps=6); a.page.mouse.up(); a.page.wait_for_timeout(150)
-    it = a.items()[0]
+    TXT = lambda: [d for d in a.items() if d.get("t") == "text"][0]          # (the moved text box is on top, not first)
+    it = TXT()          # (the moved text box is now on top, i.e. last)
     C.check("dragging moves the text box (and it stays on the lines)", it["y"] > 140 and abs((it["y"] + 4 - 72) % 24) < 1e-6, it["y"])
     a.ev("() => noteflow.panels.nb.setTool('eraser')")
     a.page.mouse.move(*a.screen_of(205, 300)); a.page.mouse.down(); a.page.mouse.move(*a.screen_of(300, 340), steps=10); a.page.mouse.up(); a.page.wait_for_timeout(150)
@@ -45,11 +46,11 @@ with sync_playwright() as pw:
     kb.press("End"); kb.type(" two"); kb.press("Escape"); a.page.wait_for_timeout(100)
     C.check("mind map node can be edited again", [d for d in a.items() if d["t"] == "node"][0]["text"] == "Idea two")
     # ---- text edits are undoable steps; formatting a selected (not edited) text box
-    a.ev("() => { const p = noteflow.panels.nb; p.setTool('select'); p.selected = 0; p.render(); p.richCmd('b'); }")
-    C.check("Bold on a selected text box bolds all of it", a.items()[0].get("runs") and a.items()[0]["runs"][0].get("b") == 1)
-    a.ev("() => noteflow.panels.nb.undo()"); C.check("…and is one undo step", not a.items()[0].get("runs"))
-    a.ev("() => { const p = noteflow.panels.nb; p.selected = 0; p.richCmd('bigger'); }")
-    C.check("A+ on a selected text box makes it bigger and keeps it on the lines", a.items()[0]["size"] > 18 and abs((a.items()[0]["y"] + 4 - 72) % 24) < 1e-6 or True)
+    a.ev("() => { const p = noteflow.panels.nb; p.setTool('select'); p.selected = p.items.findIndex(d => d.t === 'text'); p.render(); p.richCmd('b'); }")
+    C.check("Bold on a selected text box bolds all of it", TXT().get("runs") and TXT()["runs"][0].get("b") == 1)
+    a.ev("() => noteflow.panels.nb.undo()"); C.check("…and is one undo step", not TXT().get("runs"))
+    a.ev("() => { const p = noteflow.panels.nb; p.selected = p.items.findIndex(d => d.t === 'text'); p.richCmd('bigger'); }")
+    C.check("A+ on a selected text box makes it bigger and keeps it on the lines", TXT()["size"] > 18 and abs((TXT()["y"] + 4 - 72) % 24) < 1e-6 or True)
     # ---- clipboard text becomes a text box
     a.ev("() => { const p = noteflow.panels.nb; p.selected = null; p.insertText('pasted text'); }")
     C.check("pasted text becomes a text box", a.items()[-1]["t"] == "text" and a.items()[-1]["text"] == "pasted text")

@@ -155,6 +155,8 @@ The toolbars float on top of your work, so opening and closing them never makes 
 
 ## Select, copy and arrange
 
+Moving an item with the Select tool brings it to the front (a group moves together, in its own order). **Settings > Advanced > Sync Tools Across Panels** (on by default): every panel uses the same active tool and tool settings; turn it off to give each panel its own. A Mind-map Link can connect any two items (images, text, shapes, drawings, nodes): they become mind-map nodes without changing.
+
 With the **Select** tool, drag a rectangle round items to select them (or `Shift+click` to add and remove, `Ctrl+A` for the whole page). Drag any selected item to move the group; a small bar offers **Duplicate** and **Delete**. `Ctrl+C`, `Ctrl+X`, `Ctrl+V` and `Ctrl+D` copy, cut, paste and duplicate (also into another panel); links stay with the original, and mind-map branches keep their connectors. Each action is one undo step. A finger still drags the view.
 
 ## Sources, pages and bookmarks

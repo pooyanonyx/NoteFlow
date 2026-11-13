@@ -14,6 +14,7 @@ import { SourcesPanel } from "./sourcesui.js";
 import { Bookmarks } from "./bookmarks.js";
 import * as DX from "./diagnostics.js";
 import { prefs } from "./prefs.js";
+import { ToolSync } from "./toolsync.js";
 import * as SEL from "./selection.js";
 import { setImageLoadedCallback, bumpFontEpoch } from "./render.js";
 import { el, icon, toast, dialog, popup, closePopup } from "./ui.js";
@@ -120,9 +121,10 @@ export class App {
     DX.install((entry) => this.onUnexpectedError(entry));
     this.applyAppearance();
     this.applyMemoryMode();
-    prefs.onChange((k) => { if (k === "memorySaver") this.applyMemoryMode(); if (k === "theme" || k === "motion") this.applyAppearance(); if (k === "autoSave") this.onAutoSaveChanged(); });
+    prefs.onChange((k, v) => { if (k === "syncTools" && v) this.toolSync.adopt(this.active || this.panels[this.order[0]]); if (k === "memorySaver") this.applyMemoryMode(); if (k === "theme" || k === "motion") this.applyAppearance(); if (k === "autoSave") this.onAutoSaveChanged(); });
     try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (prefs.get("theme") === "system") this.applyAppearance(); }); } catch { /* old browser */ }
     this.refreshSaveStatus();
+    this.toolSync = new ToolSync(this); this.toolSync.rebase();               // (Sync Tools Across Panels: every panel's tools are known from the start; only changes are copied)
     this.setActive(this.panels.pdf);
   }
 
@@ -579,7 +581,8 @@ export class App {
     for (const [key, view] of [["nb", st.notebook], ["nb2", st.notebook2]]) { if (Number.isInteger(view?.page)) await P[key].goto(view.page); }
     const blankBoard = { paper: "white", grid: false, items: [] };
     P.board.setBoard(ws.board || blankBoard, null); P.board2.setBoard(ws.board2 || blankBoard, null);
-    for (const [key, view] of [["pdf", st.pdf], ["pdf2", st.pdf2], ["nb", st.notebook], ["nb2", st.notebook2], ["board", st.board], ["board2", st.board2]]) P[key].restoreView(view);
+    this.toolSync.quietly(() => { for (const [key, view] of [["pdf", st.pdf], ["pdf2", st.pdf2], ["nb", st.notebook], ["nb2", st.notebook2], ["board", st.board], ["board2", st.board2]]) P[key].restoreView(view); });
+    if (prefs.get("syncTools")) this.toolSync.adopt(this.active || P[this.order[0]] || P.pdf); else this.toolSync.rebase();       // (a workspace made with the setting off opens with every panel on the same tools)
     // workspace type from the file's metadata; older files have none: their saved layout is used (PDF + Notebook when nothing is saved)
     let order = M.layoutOfType(ws.type ?? ws.manifest?.workspace_type) || M.sanitizeLayout(win.layout);
     if (order.includes("nb2") && !ws.notebook2) order = [...M.DEFAULT_LAYOUT];

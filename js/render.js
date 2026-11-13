@@ -648,14 +648,26 @@ function nodePath(ctx, d) {
   else if (d.kind === "rect") ctx.rect(x, y, w, h);
   else { const r = Math.min(16, w / 2, h / 2); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
 }
-/** Union of the boxes of all items (page coordinates), or null. nodes = nodeIndex(items). */
+/** The ends a connector can attach to: mind id -> something with x1, y1, x2, y2 and kind. A node is its own end; any other item that was connected (it carries `mm`, see model.js mindId)
+ *  is an end through its box (the box of its text, image, shape or drawing), so a connector can join any two items. extra = items drawn instead of / in addition to the list (a preview). */
+export function mindIndex(items, extra = []) {
+  const m = new Map();
+  for (const list of [items, extra]) for (const d of list) {
+    const id = M.mindId(d); if (!id) continue;
+    if (d.t === "node") { m.set(id, d); continue; }
+    const b = d.t === "text" ? textBox(d) : M.geomBox(d, null, null);
+    m.set(id, { x1: b[0], y1: b[1], x2: b[2], y2: b[3], kind: d.t === "ellipse" ? "ellipse" : "rect" });
+  }
+  return m;
+}
+/** Union of the boxes of all items (page coordinates), or null. nodes = mindIndex(items). */
 export function itemBounds(d, nodes) {
   const b = d.t === "text" ? textBox(d) : M.geomBox(d, null, nodes), e = M.halfWidth(d);
   return [b[0] - e, b[1] - e, b[2] + e, b[3] + e];
 }
 export function contentBounds(items) {
   if (!items.length) return null;
-  const nodes = M.nodeIndex(items);
+  const nodes = mindIndex(items);
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const d of items) { const b = itemBounds(d, nodes); x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]); x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]); }
   return Number.isFinite(x0) ? [x0, y0, x1, y1] : null;
@@ -679,7 +691,7 @@ export function renderBoardRegion(canvas, items, { x, y, w, h, paper = "white", 
   ctx.save(); ctx.scale(scale, scale); ctx.translate(-x, -y);
   drawBoardBg(ctx, M.BOARD_W, M.BOARD_H, { paper, grid }, [x, y, x + w, y + h]);
   ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
-  const nodes = M.hasConns(items) ? M.nodeIndex(items) : null, bg = BOARD_COLORS[paper];
+  const nodes = M.hasConns(items) ? mindIndex(items) : null, bg = BOARD_COLORS[paper];
   for (const d of items) drawItem(ctx, d, { theme, nodes, bg });
   ctx.restore();
   return canvas;
@@ -776,7 +788,7 @@ export function renderPage(canvas, w, h, items, { paper = null, scale = 2 } = {}
   ctx.scale(scale, scale);
   if (paper) drawPaper(ctx, w, h, paper);
   ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();         // nothing outside the page
-  const nodes = M.hasConns(items) ? M.nodeIndex(items) : null;      // mind-map connectors are drawn between their nodes (annotated-PDF / notebook export)
+  const nodes = M.hasConns(items) ? mindIndex(items) : null;      // mind-map connectors are drawn between their nodes (annotated-PDF / notebook export)
   for (const d of items) drawItem(ctx, d, { nodes });
   ctx.restore();
   return canvas;

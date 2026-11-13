@@ -46,7 +46,7 @@ export function toggleIn(current, idx) { return current.includes(idx) ? current.
  *   - the payload is deep-copied, so later edits of the original never reach the copy. */
 export function cloneItems(items, dx = 0, dy = 0) {
   const nodeIds = new Map();
-  for (const d of items) if (d.t === "node" && d.id) nodeIds.set(d.id, M.newId());
+  for (const d of items) { const m = M.mindId(d); if (m) nodeIds.set(m, d.t === "node" ? M.newId() : M.newMindId()); }       // (nodes and every other connected item get a new mind name)
   const out = [];
   for (const d of items) {
     if (d.t === "conn" && !(nodeIds.has(d.from) && nodeIds.has(d.to))) continue;
@@ -54,7 +54,7 @@ export function cloneItems(items, dx = 0, dy = 0) {
     n = M.translate(n, dx, dy);
     if (d.t === "node") n.id = nodeIds.get(d.id);
     else if (d.t === "conn") { n.from = nodeIds.get(d.from); n.to = nodeIds.get(d.to); delete n.id; }
-    else if (n.id) n.id = M.ensureId({});
+    else { if (n.id) n.id = M.ensureId({}); if (n.mm) n.mm = nodeIds.get(d.mm); }
     out.push(n);
   }
   return out;

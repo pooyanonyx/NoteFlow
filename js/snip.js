@@ -94,7 +94,7 @@ export class SnipTool {
       const job = PDF.renderRaster(panel.pdf.doc, page, sc), ras = await job.promise;
       if (ras) { ctx.drawImage(ras, r[0] * sc, r[1] * sc, w * sc, h * sc, 0, 0, W, H); free(ras); }
       ctx.save(); ctx.scale(W / w, H / h); ctx.translate(-r[0], -r[1]); ctx.beginPath(); ctx.rect(r[0], r[1], w, h); ctx.clip();
-      const nodes = M.hasConns(pg.items) ? M.nodeIndex(pg.items) : null;                       // (mind-map connectors are drawn between their nodes)
+      const nodes = M.hasConns(pg.items) ? R.mindIndex(pg.items) : null;                       // (mind-map connectors are drawn between their nodes)
       for (const d of pg.items) R.drawItem(ctx, d, { nodes });
       ctx.restore();
       return out;

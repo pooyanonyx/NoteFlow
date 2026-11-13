@@ -36,8 +36,8 @@ export function sanitizeAnchor(a) {
     const out = { k: "pdf", doc, name: text(a.name, 200), page, pv: text(a.pv, 160) };
     const r = rect(a.rect); if (r) out.rect = r;
     if (a.quote && typeof a.quote === "object" && text(a.quote.text, 1)) {
-      const rects = Array.isArray(a.quote.rects) ? a.quote.rects.map(rect).filter(Boolean).slice(0, 40) : [];
-      out.quote = { text: text(a.quote.text, 400), rects };
+      const rects = Array.isArray(a.quote.rects) ? a.quote.rects.map(rect).filter(Boolean).slice(0, 200) : [];
+      out.quote = { text: text(a.quote.text, 8000), rects };
     }
     return out;
   }

@@ -37,6 +37,8 @@ export async function openSettings(app) {
     section("Smart linking", row("Suggestions", "Compares only the pages you are looking at. Off by default.", smart)),
     section("Performance",
       toggle("memorySaver", "Memory saver", "Keeps fewer pages in memory and draws at a lower resolution. Use it on an older computer or tablet, or with very large PDFs."), store),
+    section("Advanced",
+      toggle("syncTools", "Sync Tools Across Panels", "On: every panel uses the same active tool and the same settings for every tool (colour, thickness, opacity, text format, shapes, mind-map style). Choose the Marker with thickness 15 in one panel and every other panel has it too. Off: each panel keeps its own tool and settings.")),
     section("Troubleshooting",
       row("Diagnostic log", "Errors recorded in this session. Nothing is ever sent anywhere.", el("button", { class: "btn small", type: "button", onclick: async () => {
         try { await navigator.clipboard.writeText(DX.report({ workspace: app.wsName || "(not exported)", backup: app.autosaveOk ? "ok" : "failing" })); toast("Copied. Paste it into your bug report."); } catch { toast("Could not copy. Allow clipboard access and try again.", 4000); } } }, "Copy log")),

@@ -65,8 +65,10 @@ export const isClosedShape = (d) => d.t === "rect" || d.t === "ellipse" || d.t =
 // ------------------------------------------------------------------ board + mind map
 // A Board is ONE big page of ordinary items (pen, text, shapes, images ...) plus mind-map items:
 //   node {t:"node", id, kind: round|ellipse|rect, x1,y1,x2,y2, text, color, w, size, fill?, dir?, align?}
-//   conn {t:"conn", from: nodeId, to: nodeId, style: curve|line|elbow, arrow: bool, color, w, label?}
-// A connector stores the ids of its two nodes, not coordinates: its path follows the nodes when they move.
+//   conn {t:"conn", from: mindId, to: mindId, style: curve|line|elbow, arrow: bool, color, w, label?}
+// A connector stores the mind ids of its two ends, not coordinates: its path follows them when they move. An END is any item: a node, or any other item (image, text box, shape, drawing...)
+// that carries a mind id `mm`. `mm` is the mind map's OWN name for an item, made when the item is first connected; it is not the item's `id` (Smart Linking, PDF source links and
+// Notebook references use `id`, and none of them reads or writes `mm`, nor the other way round). An item with `mm` keeps everything else exactly as it was.
 export const BOARD_FORMAT = "NoteFlow-board", BOARD_W = 4000.0, BOARD_H = 3000.0;
 export const BOARD_BGS = ["white", "black"];                  // page.paper of a board; page.grid = dotted grid on/off
 export const NODE_KINDS = ["round", "ellipse", "rect"], CONN_STYLES = ["curve", "line", "elbow"];
@@ -75,12 +77,25 @@ export const NODE_PAD = 10, NODE_MIN_W = 90, NODE_MIN_H = 44, NODE_MAX_W = 260, 
  *  versions of the page kept for undo share this very object, so they carry the id too (a link never loses its item by undoing). */
 export function ensureId(d) { if (!d.id) d.id = "i" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4); return d.id; }
 export const newId = () => "n" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3);
+/** The mind-map name of an item: a node's id, the `mm` of any other item that was connected, else null. */
+export const mindId = (d) => (d && d.t === "node" ? d.id || null : d && d.t !== "conn" && typeof d.mm === "string" && d.mm ? d.mm : null);
+export const newMindId = () => "m" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3);
 export const nodeIndex = (items) => { const m = new Map(); for (const d of items) if (d.t === "node" && d.id) m.set(d.id, d); return m; };
 export const hasConns = (items) => items.some((d) => d.t === "conn");
+/** Stacking: the order of a page's items is the order they are drawn in (the last is on top). Bring the items at idxs to the front: they move to the end of the list in the order they
+ *  had, so a group stays together and keeps its own arrangement. -> { items, idxs (their new places, in the order of the given idxs), map (old index -> new index) } */
+export function raiseToFront(items, idxs) {
+  const up = new Set(idxs), rest = [], top = [];
+  items.forEach((d, i) => (up.has(i) ? top : rest).push(i));
+  const order = [...rest, ...top], map = new Array(items.length);
+  order.forEach((old, n) => { map[old] = n; });
+  return { items: order.map((i) => items[i]), idxs: idxs.map((i) => map[i]), map };
+}
 /** Drop connectors whose node no longer exists (after a node was deleted / erased). */
 export function pruneOrphans(items) {
   if (!hasConns(items)) return items;
-  const ids = nodeIndex(items), keep = items.filter((d) => d.t !== "conn" || (ids.has(d.from) && ids.has(d.to)));
+  const ids = new Set(); for (const d of items) { const m = mindId(d); if (m) ids.add(m); }
+  const keep = items.filter((d) => d.t !== "conn" || (ids.has(d.from) && ids.has(d.to)));
   return keep.length === items.length ? items : keep;
 }
 const nodeCenter = (n) => [(n.x1 + n.x2) / 2, (n.y1 + n.y2) / 2];
@@ -229,6 +244,7 @@ export function sanitizeStyle(d, dflt) {
 
 // ------------------------------------------------------------- validation
 function addExtras(d, out) {
+  if (out.t !== "node" && out.t !== "conn" && typeof d.mm === "string" && d.mm) out.mm = d.mm.slice(0, 40);        // mm: the mind-map name of an item that was connected (see mindId)
   if (out.t !== "node" && out.t !== "conn" && typeof d.id === "string" && d.id) out.id = d.id.slice(0, 40);        // id: a stable name for the item, given when something links to it (see ensureId); optional, older files / apps never have it
   for (const [k, lo, hi] of [["alpha", 0, 255], ["bright", -100, 100]]) {
     if (k in d) { try { out[k] = clamp(pyRound(num(d[k])), lo, hi); } catch { /* ignore bad optional value */ } }
@@ -429,7 +445,7 @@ export function erasePen(d, a, b, r) {
   }
   if (cur) pieces.push(cur);
   if (!touched) return null;
-  return pieces.filter((pc) => pc.length >= 2 && polyLen(pc) >= 0.4).map((pc, k) => { const o = { ...d, pts: pc }; if (k) delete o.id; return o; });     // (the pieces of an erased stroke: only the first keeps the item's id)
+  return pieces.filter((pc) => pc.length >= 2 && polyLen(pc) >= 0.4).map((pc, k) => { const o = { ...d, pts: pc }; if (k) { delete o.id; delete o.mm; } return o; });     // (the pieces of an erased stroke: only the first keeps the item's id)
 }
 
 /** Corner points of a t:"shape" item in page coordinates. */
