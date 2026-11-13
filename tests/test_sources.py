@@ -77,9 +77,9 @@ with sync_playwright() as pw:
     P("() => { noteflow.smart.suggestions = []; noteflow.smart.draw(); noteflow.sources.render(); }")
     # ---------------------------------------------------------- Quote from PDF
     a.page.locator(".srcscope button", has_text="PDF page").click(); P("async () => { noteflow.panels.pdf.goto(0); noteflow.setActive(noteflow.panels.pdf); }"); a.page.wait_for_timeout(500)
-    a.page.locator(".sources button", has_text="Quote from PDF").click(); a.page.wait_for_timeout(200)
+    a.page.locator(".sources button.linkact[data-action=quote]").click(); a.page.wait_for_timeout(200)
     g = a.page.locator(".linkguide:not(.snipcard)").inner_text()
-    C.check("Quote from PDF starts a one-step mode with a guide", "Quote" in g and "drag across text" in g.lower(), g)
+    C.check("Quote starts a one-step mode with a guide", "Quote" in g and "drag across text" in g.lower(), g)
     def screen(i, x, y): return P("([i, x, y]) => { const p = noteflow.panels.pdf, r = p.stage.getBoundingClientRect(), [sx, sy] = p.pageToScreenAt(i, x, y); return [r.left + sx, r.top + sy]; }", [i, x, y])
     m.click(*screen(0, 300, 400)); a.page.wait_for_timeout(250)
     C.check("a tap that is not a text passage makes no quote", P("() => noteflow.panels.nb.items.length") == 4 and P("() => noteflow.links.picking"))

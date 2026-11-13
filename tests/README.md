@@ -30,6 +30,7 @@ node --test "tests/unit/*.test.mjs"
 | `test_save.py` | the backup on this device: the Saved / Unsaved / Backup failed indicator, Ctrl+S (never a download or a picker), Auto-Save (on by default, off, switching), rapid changes, storage kept small, recovery after refresh and restart, failing, interrupted (atomic) and damaged backups with the fallback to the previous one, Export as a separate act, moving the old `dualnote` database, the global error notice |
 | `test_selection.py` | marquee / Shift+click / Ctrl+A, group move / delete / duplicate (one undo step), copy / cut / paste (also to another panel), links not shared with copies, mind-map copies, touch still scrolls, pen pressure |
 | `test_pdf_quote.py` | quoting from real PDFs with awkward layouts (columns drawn across both, reversed drawing order, hyphenated wraps, paragraphs, lists): exact text |
+| `test_toolbar_actions.py` | Link and Quote in the top bar and Sources (one definition, pressed state); Node and Link as separate tools on every panel |
 | `test_toolsync.py`, `test_stack_mindlinks.py` | Sync Tools Across Panels; bring-to-front on move (undo/redo, save/reopen); mind-map links between any items |
 | `test_sources.py`, `test_pdfnav.py` | the Sources panel (follows the page, backlinks, Quote a passage) and the Pages / Outline tabs (thumbnails with bounded memory, outline, bookmarks saved in the workspace) |
 | `test_pdf_export.py` | real PDF annotations on export, read back and drawn by pdf.js; rotated pages; the exported file reopens with every item unchanged |

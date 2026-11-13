@@ -146,7 +146,7 @@ export class App {
       b("plus", "New", "Start a new empty workspace", () => this.newWorkspace()),
       b("search", "Search", "Search everywhere: notebooks, PDFs, boards (" + K.MOD + "+Shift+F)", () => this.search.toggle()),
       b("snip", "Snip", "Snipping tool: capture an area of a PDF page, a notebook page or the board, then copy it or insert it into another panel (" + K.MOD + "+Shift+S)", () => this.snip.toggle()),
-      this.linkBtn = b("chain", "Link", "Link two things: a note, text box or drawing with a PDF page, region or text. Select the note first, or just press Link.", () => this.startLink()),
+      this.linkBtn = this.links.actionButton("link"), this.quoteBtn = this.links.actionButton("quote"),          // (Link and Quote: the same two buttons as in the Sources panel)
       this.sourcesBtn = b("toc", "Sources", "Side panel: the sources of the page you are on (which PDF passages your notes cite, which notes cite this page), page thumbnails, and the PDF outline with your bookmarks", () => this.sources.toggle()),
       this.linksBtn = b("list", "Links", "All links between notes and PDFs: see, open or remove them, and the Smart linking settings", () => this.links.manage()),
       el("span", { class: "gap" }), this.layoutBtn, this.switchBtn, this.seg, this.installBtn,
@@ -408,7 +408,7 @@ export class App {
   async help() {
     const r = await dialog({ title: "NoteFlow - quick help", buttons: [{ label: "Keyboard shortcuts", value: "keys" }, { label: "Close", value: true, primary: true }], content: el("div", { class: "help" },
       el("p", {}, el("b", {}, "Touch: "), "one finger draws with the chosen tool; two fingers scroll and pinch-zoom. With the Select or Hand tool, drag to scroll. While a pen/stylus is in use, finger touches are ignored (palm rejection)."),
-      el("p", {}, el("b", {}, "Board: "), "a big canvas for sketches and mind maps (mind maps also work on PDF and notebook pages: use the Mind map button). Switch between a white board and a blackboard with the sun / moon button (your ink adapts, nothing is changed). Mind map: use the Node tool to add nodes, drag from a node with the Link tool to connect, Tab adds a child, Enter a sibling, double-tap a node or connector to edit its text."),
+      el("p", {}, el("b", {}, "Board: "), "a big canvas for sketches and mind maps (mind maps also work on PDF and notebook pages: use the Node and Link tools). Switch between a white board and a blackboard with the sun / moon button (your ink adapts, nothing is changed). Mind map: use the Node tool to add nodes, drag from a node with the Link tool to connect, Tab adds a child, Enter a sibling, double-tap a node or connector to edit its text."),
       el("p", {}, el("b", {}, "Layout: "), "the Layout menu chooses which panels the workspace has (up to three: PDF, Notebook, Board). Use “Customize panels…” for any order or a second PDF / Notebook / Board."),
       el("p", {}, el("b", {}, "PDF pages: "), "pages are laid out one after another - just scroll (mouse wheel, two fingers, or the Hand tool). The page box jumps to a page number; the arrows move one page."),
       el("p", {}, el("b", {}, "Edit: "), "Select an item to move it or drag the round handles to resize it. Double-tap text and notes to edit. Delete key or the Eraser removes items."),

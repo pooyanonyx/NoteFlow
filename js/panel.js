@@ -25,16 +25,15 @@ const TOOL_INFO = {
   hltext: ["Highlight", "Drag across PDF text to highlight whole words"], eraser: ["Eraser", "Erase part of a pen or marker stroke by dragging over it (size: Brush button); other items are removed whole"],
   text: ["Text", "Tap to add a text box"], note: ["Note", "Tap to stick a sticky note on the page"],
   shape: ["Shapes", "Pick a shape (line, arrow, rectangle, ellipse, triangle, ...) and draw it"],
-  node: ["Node", "Mind map: tap to add a node, drag to move it (Tab = child, Enter = sibling)"],
-  link: ["Link", "Mind map: drag from one node to another to connect them (drop on empty space = new node)"],
+  node: ["Node", "Mind map node: tap to add a node, drag to move it (Tab = child, Enter = sibling)"],
+  link: ["Link", "Mind map link: drag from any item (a node, an image, text, a shape, a drawing) to another to connect them; drop on empty space = new node. (Not the Link button in the top bar, which ties notes to PDFs.)"],
   pan: ["Hand", "Drag to scroll"],
 };
-const PDF_TOOLS = ["select", "pan", "pen", "mark", "hltext", "eraser", "text", "note", "shape"];
-const NB_TOOLS = ["select", "pan", "pen", "mark", "eraser", "text", "note", "shape"];
-const BOARD_TOOLS = ["select", "pan", "pen", "mark", "eraser", "text", "note", "shape"];
-const SEP_AFTER = new Set(["pan", "eraser", "shape", "link"]);
+const PDF_TOOLS = ["select", "pan", "pen", "mark", "hltext", "eraser", "text", "note", "shape", "node", "link"];       // Node and Link are ordinary tools on every panel (one button each)
+const NB_TOOLS = ["select", "pan", "pen", "mark", "eraser", "text", "note", "shape", "node", "link"];
+const BOARD_TOOLS = ["select", "pan", "pen", "mark", "eraser", "text", "note", "shape", "node", "link"];
+const SEP_AFTER = new Set(["pan", "eraser", "link"]);
 const GROUP_OF_TOOL = T.TOOL_GROUP;                // every creating tool has its OWN settings (tools.js)
-const MIND_TOOLS = ["node", "link"];                  // on every panel (PDF, notebook, board) these two tools live in one "Mind map" menu button
 const OLD_SHAPE_TOOLS = ["line", "arrow", "rect", "ellipse"];     // separate tools of older versions / workspaces -> Shapes tool
 const STYLE_TO_ITEM = { color: "color", width: "w", size: "size", alpha: "alpha", bright: "bright" };
 const SIZE_LADDER = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 72, 96, 128];
@@ -191,12 +190,6 @@ export class Panel {
           "aria-pressed": "false", onclick: () => this.setTool(k) }, icon(k), el("span", { class: "lbl" }, TOOL_INFO[k][0]));
       }
       this.toolBtns[k] = x; toolBar.append(x);
-      if (k === "shape") {                                       // one button for the mind-map tools (Node, Link): same idea as the Shapes menu
-        this.mindBtn = el("button", { class: "btn tool", type: "button", "aria-label": "Mind map", "aria-haspopup": "menu", "aria-pressed": "false",
-          title: `Mind map: nodes and connectors (${K.TOOL_KEYS.node} node, ${K.TOOL_KEYS.link} link)`, onclick: () => this.openMindMenu() },
-          icon("node"), el("span", { class: "lbl" }, "Mind map"), icon("chevdown", "tiny"));
-        this.toolBtns.node = this.toolBtns.link = this.mindBtn; toolBar.append(this.mindBtn);
-      }
       if (SEP_AFTER.has(k)) toolBar.append(el("span", { class: "tsep" }));            // group: pointer & hand | draw | text & shapes & mind map
     }
     this.fillBtn = el("button", { class: "btn tool fillbtn", type: "button", "aria-label": "Fill", "aria-pressed": "false", disabled: true,
@@ -275,7 +268,6 @@ export class Panel {
     this.tool = tool; this.linkTarget = null; if (tool !== "eraser") this.eraserPos = null;
     this.colorBtn.disabled = tool === "eraser";                       // the eraser has a size but no colour
     for (const [k, x] of Object.entries(this.toolBtns)) { x.classList.toggle("on", k === tool); x.setAttribute("aria-pressed", String(k === tool)); }
-    if (this.mindBtn) { const on = tool === "node" || tool === "link"; this.mindBtn.classList.toggle("on", on); this.mindBtn.setAttribute("aria-pressed", String(on)); }
     this.stage.dataset.tool = tool;
     if (tool !== "select" && this.selected !== null && !temp) this.selected = null;
     const g = GROUP_OF_TOOL[tool];
@@ -1665,14 +1657,6 @@ export class Panel {
   }
 
   // ------------------------------------------------------------------ mind map
-  openMindMenu() {                                    // PDF / notebook: choose the Node or Link tool
-    this.finishEdit();
-    const row = (tool, ic, label, desc) => el("button", { class: "mi" + (this.tool === tool ? " on" : ""), type: "button", role: "menuitemradio", "aria-checked": String(this.tool === tool),
-      title: desc, onclick: () => { closePopup(); this.setTool(tool); } }, icon(ic), el("span", { class: "mlab" }, label, el("small", {}, desc)), el("kbd", {}, K.TOOL_KEYS[tool]));
-    popup(this.mindBtn, el("div", { class: "menu mindmenu", role: "menu" },
-      row("node", "node", "Node", "Tap to add a node. Tab = child, Enter = sibling."),
-      row("link", "link", "Link", "Drag from any item (a node, an image, text, a shape, a drawing) to another to connect them."), el("div", { class: "msep" }), this.resetRow("node")));
-  }
   buildMindGroup() {
     const mb = (ic, title, fn) => el("button", { class: "btn tool fmt", type: "button", title, "aria-label": title, "aria-pressed": "false", onclick: fn }, icon(ic));
     const sep = () => el("span", { class: "fsep" });
@@ -2599,7 +2583,7 @@ export class Panel {
       let tool = tb.tool;
       if (OLD_SHAPE_TOOLS.includes(tool)) { this.shapeKind = tool; tool = "shape"; }   // workspaces from before the Shapes tool
       this.updateShapeBtn();
-      const allowed = [...(this.kind === "pdf" ? PDF_TOOLS : this.kind === "board" ? BOARD_TOOLS : NB_TOOLS), ...MIND_TOOLS];
+      const allowed = this.kind === "pdf" ? PDF_TOOLS : this.kind === "board" ? BOARD_TOOLS : NB_TOOLS;
       this.setTool(allowed.includes(tool) ? tool : this.tool);
     }
     if (typeof st.bars === "boolean") this.setBars(st.bars);

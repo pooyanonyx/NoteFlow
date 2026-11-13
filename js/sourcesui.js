@@ -86,7 +86,7 @@ export class SourcesPanel {
     const scopes = [["pdf", "PDF page", "The links of the PDF page you are reading"], ["notes", "Notebook page", "The links of the notes on the page you are writing"], ["all", "Everything", "All links of this workspace"]];
     kids.push(el("div", { class: "srcscope", role: "radiogroup", "aria-label": "Which links to show" }, ...scopes.map(([k, l, t]) => el("button", { class: "btn small" + (this.scope === k ? " on" : ""), type: "button", role: "radio", "aria-checked": String(this.scope === k), title: t, onclick: () => this.setScope(k) }, l))));
     const checkBtn = el("button", { class: "btn small", type: "button", title: "Look for notes and PDF passages that match, between the pages you are looking at", onclick: () => app.smart.scan({ manual: true }) }, "Find matches");
-    const quoteBtn = el("button", { class: "btn small primary", type: "button", title: "Drag across text in the PDF: that text goes into your notes, linked to where it came from", onclick: () => L.quote() }, "Quote from PDF");
+    const linkBtn = L.actionButton("link", { small: true }), quoteBtn = L.actionButton("quote", { small: true });
     const sugg = app.smart.suggestions.length;
     const empty = (t) => el("p", { class: "srcempty" }, t);
     const heading = (t, n) => el("h3", {}, n === undefined ? t : `${t} (${n})`);
@@ -120,7 +120,7 @@ export class SourcesPanel {
       if (all.notes.length && shown < cap) kids.push(el("section", { class: "srcsec" }, heading("Links between notes", all.notes.length), ...all.notes.slice(0, cap - shown).map((c) => this.card(c))));
       if (total > cap) kids.push(el("p", { class: "srchint" }, `Showing the first ${cap}. Choose a page scope to see the rest.`));
     }
-    const top = el("div", { class: "srcact" }, quoteBtn, checkBtn);
+    const top = el("div", { class: "srcact" }, linkBtn, quoteBtn, checkBtn);
     kids.splice(1, 0, top);
     if (sugg) kids.splice(2, 0, el("div", { class: "srcsugg", role: "status" }, el("span", {}, `${sugg} suggested link${sugg === 1 ? "" : "s"} waiting for your answer`), el("button", { class: "btn small", type: "button", onclick: () => app.smart.showCard() }, "Review")));
     this.body.replaceChildren(...kids.filter(Boolean));

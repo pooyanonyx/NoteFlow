@@ -1,6 +1,6 @@
 // NoteFlow service worker: makes the app work offline after the first visit.
 // Bump CACHE when you change files so devices pick up the new version.
-const CACHE = "noteflow-v32";
+const CACHE = "noteflow-v33";
 
 self.addEventListener("install", (e) => {
   e.waitUntil((async () => {

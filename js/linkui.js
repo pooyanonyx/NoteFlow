@@ -28,6 +28,10 @@ export function itemKind(d) {
   return { text: "Text box", note: "Note", node: "Mind map node", pen: "Drawing", mark: "Marker", hl: "Highlight", image: "Image", rect: "Shape", ellipse: "Shape", line: "Shape", arrow: "Shape", shape: "Shape" }[d.t] || "Item";
 }
 
+const ACTIONS = {
+  link: { icon: "chain", label: "Link", title: "Link two things that already exist: a note, text box or drawing with a PDF page, region or passage. Select the note first, or just press Link." },
+  quote: { icon: "quote", label: "Quote", title: "Quote: drag across text in the PDF and that text goes into your notes, linked to its page. (Link connects things you already have; Quote brings the text in.)" },
+};
 export class LinkController {
   constructor(app) {
     this.app = app; this.store = new LinkStore(); this.pick = null; this.rev = 0; this.cache = new Map(); this.cacheRev = -1;
@@ -175,6 +179,7 @@ export class LinkController {
   /** The guide card: the two ends chosen so far and, in one sentence, what to do next. */
   say() {
     const k = this.pick;
+    this.syncButtons();
     this.guide.hidden = !k; if (!k) return;
     if (k.quote) { this.guide.replaceChildren(icon("chain"), el("div", { class: "lgchips" }, el("span", { class: "lgstep" }, "Quote: drag across text in the PDF. The passage goes into your notes, linked to its page.")), el("button", { class: "btn small", type: "button", onclick: () => this.cancel() }, "Cancel")); return; }
     const a = k.a, step = a ? 2 : 1;
@@ -202,8 +207,28 @@ export class LinkController {
   }
   cancel() {
     if (!this.pick) return;
-    this.pick = null; this.guide.hidden = true;
+    this.pick = null; this.guide.hidden = true; this.syncButtons();
     for (const p of Object.values(this.app.panels)) { p.root.classList.remove("linkpick"); p.pickPrev = null; if (p.action && p.action.type === "pick") p.action = null; p.render(); }
+  }
+  /** The two ways of tying notes to a PDF, as buttons. The top bar and the Sources panel both make theirs here, so they look, read and behave the same:
+   *    Link  - connects two things that already exist (a note, text box or drawing with a PDF page, region or passage); nothing new is written.
+   *    Quote - brings a passage of the PDF into your notes: the text is inserted AND linked to its page in one gesture.
+   *  A button is pressed while its mode is waiting for you, and pressing it again cancels. (Mind-map Node / Link in the panel toolbars are a different thing and never touch these.) */
+  actionButton(kind, { small = false } = {}) {
+    const info = ACTIONS[kind], b = el("button", { class: "btn" + (small ? " small" : "") + " linkact", type: "button", title: info.title, "aria-label": info.title, "aria-pressed": "false", dataset: { action: kind },
+      onclick: () => (kind === "quote" ? this.quote() : this.app.startLink()) }, icon(info.icon), el("span", { class: "lbl" }, info.label));
+    (this.actionBtns || (this.actionBtns = new Set())).add(b);
+    this.syncButtons();
+    return b;
+  }
+  syncButtons() {
+    if (this.actionBtns && this.actionBtns.size > 24) for (const b of this.actionBtns) if (!b.isConnected && b.dataset.seen) this.actionBtns.delete(b);
+    for (const b of this.actionBtns || []) {
+      if (!b.isConnected && b.dataset.seen) { this.actionBtns.delete(b); continue; }
+      if (b.isConnected) b.dataset.seen = "1";
+      const on = !!this.pick && (b.dataset.action === "quote") === !!this.pick.quote;
+      b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on));
+    }
   }
   /** "Quote a passage": drag across text in a PDF; the passage becomes a quote in a notebook / board, linked to where it came from (one gesture instead of write, select, link). */
   quote() {

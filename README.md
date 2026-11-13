@@ -88,10 +88,10 @@ Everything you do can be **undone and redone**, including erasing. Colours, thic
 
 Mind maps are not locked to the board. You can build them on a **PDF page**, in a **notebook** or on the **board**, so you can map out a chapter right on top of the pages you are studying.
 
-1. Open the **Mind map** menu in the toolbar and choose **Node**.
+1. Choose **Node** in the toolbar (Node and Link are two ordinary tools, one click each).
 2. Tap anywhere to add your first idea and type it. The shape grows to fit your text.
 3. Press **Tab** to add a **child** idea, or **Enter** to add a **sibling**. A connector is drawn for you.
-4. Or choose **Link** and drag from one idea to another to connect them. Drop the link on empty space and a new connected idea appears there.
+4. Or choose **Link** and drag from one idea to another to connect them. It works on any items (images, text, shapes, drawings), not only nodes. Drop the link on empty space and a new connected idea appears there. (This Link tool is only for the mind map; the **Link** button in the top bar ties notes to PDFs.)
 
 More you can do:
 
@@ -163,7 +163,7 @@ With the **Select** tool, drag a rectangle round items to select them (or `Shift
 
 The **Sources** button opens a side panel that follows the page you are on:
 
-- **Sources**: on a PDF page, the notes that cite it (page, region or passage) and the other pages that have notes; on a notebook page, the sources its notes cite, and long notes that cite nothing yet. **Quote a passage** lets you drag across PDF text and puts it into your notes as a quote, already linked to where it came from.
+- **Sources**: on a PDF page, the notes that cite it (page, region or passage) and the other pages that have notes; on a notebook page, the sources its notes cite, and long notes that cite nothing yet. **Link** and **Quote** are in the top bar and in this panel (same buttons): **Link** connects two things you already have (a note with a PDF page, region or passage); **Quote** lets you drag across PDF text and puts it into your notes as a quote, already linked to where it came from.
 - **Pages**: thumbnails of every page, drawn only when they scroll into view (a limited number are kept in memory), with badges for links and bookmarks.
 - **Outline**: your **bookmarks** (saved in the workspace) and the PDF's own table of contents.
 
@@ -198,7 +198,7 @@ Press `?` any time to see the full list.
 1. **Open NoteFlow** in your browser.
 2. **Drop a PDF** onto the page, or press **Open**.
 3. **Highlight** a passage, then switch to the **Notebook** side and write what it means in your own words.
-4. Open the **Mind map** menu and sketch how the ideas connect.
+4. Choose the **Node** and **Link** tools and sketch how the ideas connect.
 5. That is all: NoteFlow saves as you work. Press **Export** only when you want a file to keep or move.
 
 ---
